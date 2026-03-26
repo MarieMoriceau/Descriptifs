@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: equation-sie-gamma
+    env: python
+    buildCommand: apt-get install -y tesseract-ocr tesseract-ocr-fra poppler-utils && pip install -r requirements.txt
+    startCommand: gunicorn app:app --timeout 600 --workers 2
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
