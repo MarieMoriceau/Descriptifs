@@ -2,6 +2,5 @@ services:
   - type: web
     name: equation-sie-gamma
     env: python
-    pythonVersion: "3.11.0"
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 600 --workers 2
+    startCommand: gunicorn app:app --timeout 600 --workers 1
