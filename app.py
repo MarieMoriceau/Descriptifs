@@ -3,7 +3,7 @@
 Equation SIE — PDF → Gamma
 Version synchrone : une seule requête, pas de polling
 """
-import os, json, re, base64, tempfile, time, io
+import os, json, re, base64, tempfile, time, io, threading
 import requests
 import pdfplumber
 from pypdf import PdfReader
@@ -11,6 +11,7 @@ from PIL import Image
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
+jobs = {}
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
