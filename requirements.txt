@@ -2,5 +2,5 @@ flask==3.0.3
 requests==2.31.0
 pdfplumber==0.11.0
 pypdf==4.2.0
-Pillow==10.4.0
+Pillow
 gunicorn==22.0.0
