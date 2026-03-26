@@ -3,4 +3,4 @@ services:
     name: equation-sie-gamma
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 600 --workers 1
+    startCommand: gunicorn app:app --timeout 600 --workers 1 --worker-class gevent --worker-connections 100
