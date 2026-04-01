@@ -25,112 +25,119 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Equation SIE — PDF → Gamma</title>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<title>PDF vers Gamma — Equation SIE</title>
 <style>
-  :root {
-    --gold: #C9A84C; --gold-light: #E8D5A3; --dark: #1A1A1A; --mid: #2D2D2D;
-    --surface: #242424; --text: #F0EDE8; --muted: #888; --success: #4CAF7D; --error: #E05252;
-  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: var(--dark); color: var(--text); font-family: 'DM Sans', sans-serif; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; }
-  .header { text-align: center; margin-bottom: 3rem; }
-  .logo { font-family: 'Playfair Display', serif; font-size: 1rem; letter-spacing: 0.3em; text-transform: uppercase; color: var(--gold); margin-bottom: 0.5rem; }
-  h1 { font-family: 'Playfair Display', serif; font-size: 2.4rem; font-weight: 400; line-height: 1.2; }
-  h1 span { color: var(--gold); }
-  .subtitle { color: var(--muted); font-size: 0.95rem; margin-top: 0.75rem; font-weight: 300; }
-  .card { background: var(--surface); border: 1px solid #333; border-radius: 16px; padding: 2.5rem; width: 100%; max-width: 560px; }
-  .drop-zone { border: 2px dashed #3D3D3D; border-radius: 12px; padding: 3rem 2rem; text-align: center; cursor: pointer; transition: all 0.3s; position: relative; background: var(--mid); }
-  .drop-zone:hover, .drop-zone.dragover { border-color: var(--gold); background: #2A2520; }
-  .drop-icon { font-size: 2.5rem; margin-bottom: 1rem; display: block; }
-  .drop-zone h3 { font-weight: 500; font-size: 1rem; margin-bottom: 0.4rem; }
-  .drop-zone p { color: var(--muted); font-size: 0.85rem; }
-  .drop-zone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
-  .file-selected { display: none; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; background: #2A2520; border: 1px solid var(--gold); border-radius: 8px; margin-top: 1rem; font-size: 0.9rem; }
+  body { background: #f0f2f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+  .card { background: white; border-radius: 16px; padding: 2.5rem 2rem; width: 100%; max-width: 480px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; }
+  .dots { display: flex; justify-content: center; gap: 8px; margin-bottom: 1.5rem; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-red { background: #e53935; }
+  .dot-dark { background: #37474f; }
+  .dot-blue { background: #90a4ae; }
+  h1 { font-size: 1.6rem; font-weight: 700; color: #1a1a2e; margin-bottom: 0.4rem; }
+  .subtitle { color: #6b7280; font-size: 0.95rem; margin-bottom: 2rem; }
+  .info-box { background: #f8f9fa; border-left: 4px solid #e53935; border-radius: 6px; padding: 0.85rem 1rem; margin-bottom: 2rem; text-align: left; }
+  .info-title { font-weight: 600; color: #1a1a2e; font-size: 0.95rem; }
+  .info-sub { color: #6b7280; font-size: 0.85rem; margin-top: 0.2rem; }
+  .drop-zone { border: 2px dashed #d1d5db; border-radius: 10px; padding: 2rem 1.5rem; cursor: pointer; transition: all 0.2s; position: relative; margin-bottom: 1rem; }
+  .drop-zone:hover, .drop-zone.dragover { border-color: #e53935; background: #fff5f5; }
+  .drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .drop-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+  .drop-zone h3 { font-size: 0.95rem; color: #374151; font-weight: 500; }
+  .drop-zone p { font-size: 0.82rem; color: #9ca3af; margin-top: 0.25rem; }
+  .file-selected { display: none; align-items: center; gap: 0.6rem; padding: 0.65rem 1rem; background: #fff5f5; border: 1px solid #e53935; border-radius: 8px; margin-bottom: 1rem; font-size: 0.88rem; color: #e53935; font-weight: 500; }
   .file-selected.visible { display: flex; }
-  .file-name { flex: 1; color: var(--gold-light); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .btn { width: 100%; padding: 1rem; background: var(--gold); color: var(--dark); border: none; border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 1rem; font-weight: 600; cursor: pointer; margin-top: 1.5rem; transition: all 0.2s; }
-  .btn:hover { background: var(--gold-light); transform: translateY(-1px); }
-  .btn:disabled { background: #444; color: #777; cursor: not-allowed; transform: none; }
-  .loading { display: none; text-align: center; margin-top: 1.5rem; padding: 1.5rem; background: var(--mid); border-radius: 10px; }
-  .loading.visible { display: block; }
-  .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top-color: var(--gold); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
+  .file-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .btn { width: 100%; padding: 0.9rem; background: #e53935; color: white; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+  .btn:hover { background: #c62828; }
+  .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+  .status { margin-top: 1.2rem; padding: 0.85rem 1rem; border-radius: 8px; font-size: 0.9rem; display: none; text-align: left; }
+  .status.visible { display: block; }
+  .status.loading { background: #f0f4ff; color: #3b5bdb; }
+  .status.ok { background: #f0fdf4; color: #16a34a; text-align: center; }
+  .status.error { background: #fff5f5; color: #dc2626; }
+  .log-lines { margin-top: 0.5rem; font-size: 0.8rem; color: #6b7280; }
+  .result-link { display: inline-block; margin-top: 0.75rem; padding: 0.6rem 1.4rem; background: #16a34a; color: white; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 0.9rem; }
+  .new-btn { background: none; border: 1px solid #d1d5db; color: #6b7280; padding: 0.5rem 1.2rem; border-radius: 8px; font-size: 0.85rem; cursor: pointer; margin-top: 0.75rem; }
+  .new-btn:hover { border-color: #e53935; color: #e53935; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .loading p { color: var(--muted); font-size: 0.9rem; }
-  .loading strong { color: var(--gold); display: block; margin-bottom: 0.5rem; }
-  .result { display: none; margin-top: 1.5rem; padding: 1.25rem; background: #1A2E1E; border: 1px solid var(--success); border-radius: 10px; text-align: center; }
-  .result.visible { display: block; }
-  .result-icon { font-size: 2rem; margin-bottom: 0.5rem; }
-  .result h3 { color: var(--success); font-size: 1rem; margin-bottom: 0.75rem; }
-  .result a { display: inline-block; padding: 0.6rem 1.5rem; background: var(--success); color: white; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 0.9rem; }
-  .error-box { display: none; margin-top: 1.5rem; padding: 1rem; background: #2E1A1A; border: 1px solid var(--error); border-radius: 10px; color: var(--error); font-size: 0.875rem; text-align: center; }
-  .error-box.visible { display: block; }
-  .new-btn { background: none; border: 1px solid #444; color: var(--muted); width: 100%; padding: 0.7rem; border-radius: 8px; font-family: 'DM Sans', sans-serif; font-size: 0.875rem; cursor: pointer; margin-top: 0.75rem; transition: all 0.2s; }
-  .new-btn:hover { border-color: var(--gold); color: var(--gold); }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(59,91,219,0.3); border-top-color: #3b5bdb; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
 </style>
 </head>
 <body>
-<div class="header">
-  <div class="logo">Equation SIE</div>
-  <h1>PDF <span>→</span> Gamma</h1>
-  <p class="subtitle">Glissez un descriptif confrère — obtenez un Gamma en 3 minutes</p>
-</div>
 <div class="card">
+  <div class="dots">
+    <div class="dot dot-red"></div>
+    <div class="dot dot-dark"></div>
+    <div class="dot dot-blue"></div>
+  </div>
+  <h1>PDF → Gamma</h1>
+  <p class="subtitle">Equation SIE — Descriptifs commerciaux</p>
+  <div class="info-box">
+    <div class="info-title">Convertir un descriptif confrere</div>
+    <div class="info-sub">Glissez un PDF — obtenez un Gamma en 3 minutes</div>
+  </div>
   <div class="drop-zone" id="dropZone">
     <input type="file" id="fileInput" accept=".pdf">
-    <span class="drop-icon">📄</span>
-    <h3>Déposez votre PDF ici</h3>
+    <div class="drop-icon">📄</div>
+    <h3>Deposez votre PDF ici</h3>
     <p>ou cliquez pour parcourir</p>
   </div>
   <div class="file-selected" id="fileSelected">
-    <span>📎</span>
-    <span class="file-name" id="fileName"></span>
+    <span>📎</span><span class="file-name" id="fileName"></span>
   </div>
-  <button class="btn" id="launchBtn" disabled onclick="launch()">Générer le Gamma</button>
-  <div class="loading" id="loading">
-    <div class="spinner"></div>
-    <strong>Traitement en cours...</strong>
-    <p>Extraction → Analyse IA → Upload photos → Génération Gamma<br>Environ 3 minutes, ne fermez pas cette page.</p>
+  <button class="btn" id="launchBtn" disabled onclick="launch()">📊 Generer le Gamma</button>
+  <div class="status loading" id="statusLoading">
+    <span class="spinner"></span>Traitement en cours...
+    <div class="log-lines" id="logLines"></div>
   </div>
-  <div class="result" id="result">
-    <div class="result-icon">✅</div>
-    <h3>Gamma créé avec succès !</h3>
-    <a id="gammaLink" href="#" target="_blank">Ouvrir le Gamma →</a>
+  <div class="status ok" id="statusOk">
+    ✅ Gamma cree avec succes !<br>
+    <a class="result-link" id="gammaLink" href="#" target="_blank">Ouvrir le Gamma →</a><br>
     <button class="new-btn" onclick="reset()">Traiter un autre PDF</button>
   </div>
-  <div class="error-box" id="errorBox">
-    <strong>Erreur</strong><br>
-    <span id="errorMsg"></span>
-    <button class="new-btn" onclick="reset()">Réessayer</button>
+  <div class="status error" id="statusError">
+    <span id="errorMsg"></span><br>
+    <button class="new-btn" onclick="reset()">Reessayer</button>
   </div>
 </div>
 <script>
-let selectedFile = null;
-const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('fileInput');
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); const f = e.dataTransfer.files[0]; if (f && f.name.endsWith('.pdf')) setFile(f); });
-fileInput.addEventListener('change', e => { if (e.target.files[0]) setFile(e.target.files[0]); });
-function setFile(f) { selectedFile = f; document.getElementById('fileName').textContent = f.name; document.getElementById('fileSelected').classList.add('visible'); document.getElementById('launchBtn').disabled = false; }
-async function launch() {
-  if (!selectedFile) return;
-  document.getElementById('launchBtn').disabled = true;
-  document.getElementById('loading').classList.add('visible');
-  document.getElementById('result').classList.remove('visible');
-  document.getElementById('errorBox').classList.remove('visible');
-  const formData = new FormData();
-  formData.append('pdf', selectedFile);
-  try {
-    const res = await fetch('/generate', { method: 'POST', body: formData, signal: AbortSignal.timeout(600000) });
-    const data = await res.json();
-    document.getElementById('loading').classList.remove('visible');
-    if (data.url) { document.getElementById('gammaLink').href = data.url; document.getElementById('result').classList.add('visible'); }
-    else { showError(data.error || 'Erreur inconnue'); }
-  } catch(e) { document.getElementById('loading').classList.remove('visible'); showError('Délai dépassé ou erreur réseau. Réessayez.'); }
+let selectedFile=null,pollInterval=null;
+const dropZone=document.getElementById('dropZone'),fileInput=document.getElementById('fileInput');
+dropZone.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.add('dragover');});
+dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('dragover');const f=e.dataTransfer.files[0];if(f&&f.name.endsWith('.pdf'))setFile(f);});
+fileInput.addEventListener('change',e=>{if(e.target.files[0])setFile(e.target.files[0]);});
+function setFile(f){selectedFile=f;document.getElementById('fileName').textContent=f.name;document.getElementById('fileSelected').classList.add('visible');document.getElementById('launchBtn').disabled=false;}
+function showStatus(id){['statusLoading','statusOk','statusError'].forEach(s=>document.getElementById(s).classList.remove('visible'));if(id)document.getElementById(id).classList.add('visible');}
+function addLog(msg){const d=document.createElement('div');d.textContent='→ '+msg;document.getElementById('logLines').appendChild(d);}
+async function launch(){
+  if(!selectedFile)return;
+  document.getElementById('launchBtn').disabled=true;
+  document.getElementById('logLines').innerHTML='';
+  showStatus('statusLoading');
+  const fd=new FormData();fd.append('pdf',selectedFile);
+  try{
+    const res=await fetch('/upload',{method:'POST',body:fd});
+    const data=await res.json();
+    if(data.job_id)pollStatus(data.job_id);
+    else{showStatus('statusError');document.getElementById('errorMsg').textContent=data.error||'Erreur upload';document.getElementById('launchBtn').disabled=false;}
+  }catch(e){showStatus('statusError');document.getElementById('errorMsg').textContent='Erreur reseau: '+e.message;document.getElementById('launchBtn').disabled=false;}
 }
-function showError(msg) { document.getElementById('errorMsg').textContent = msg; document.getElementById('errorBox').classList.add('visible'); document.getElementById('launchBtn').disabled = false; }
-function reset() { selectedFile = null; fileInput.value = ''; document.getElementById('fileSelected').classList.remove('visible'); document.getElementById('loading').classList.remove('visible'); document.getElementById('result').classList.remove('visible'); document.getElementById('errorBox').classList.remove('visible'); document.getElementById('launchBtn').disabled = true; }
+function pollStatus(jobId){
+  const seen=new Set();
+  pollInterval=setInterval(async()=>{
+    try{
+      const res=await fetch('/status/'+jobId);
+      const data=await res.json();
+      (data.log||[]).forEach(l=>{if(!seen.has(l)){seen.add(l);addLog(l);}});
+      if(data.status==='done'){clearInterval(pollInterval);document.getElementById('gammaLink').href=data.url;showStatus('statusOk');}
+      else if(data.status==='error'){clearInterval(pollInterval);document.getElementById('errorMsg').textContent=data.log?.[data.log.length-1]||'Erreur';showStatus('statusError');document.getElementById('launchBtn').disabled=false;}
+    }catch(e){}
+  },3000);
+}
+function reset(){if(pollInterval)clearInterval(pollInterval);selectedFile=null;fileInput.value='';document.getElementById('fileSelected').classList.remove('visible');document.getElementById('logLines').innerHTML='';showStatus(null);document.getElementById('launchBtn').disabled=true;}
 </script>
 </body>
 </html>"""
