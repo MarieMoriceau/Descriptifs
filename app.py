@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Equation SIE — PDF → Gamma
-Version synchrone : une seule requête, pas de polling
+Architecture asynchrone avec polling
 """
 import os, json, re, base64, tempfile, time, io, threading
 import requests
@@ -72,29 +72,29 @@ HTML = """<!DOCTYPE html>
     <div class="dot dot-dark"></div>
     <div class="dot dot-blue"></div>
   </div>
-  <h1>PDF → Gamma</h1>
-  <p class="subtitle">Equation SIE — Descriptifs commerciaux</p>
+  <h1>PDF &#8594; Gamma</h1>
+  <p class="subtitle">Equation SIE &#8212; Descriptifs commerciaux</p>
   <div class="info-box">
     <div class="info-title">Convertir un descriptif confrere</div>
-    <div class="info-sub">Glissez un PDF — obtenez un Gamma en 3 minutes</div>
+    <div class="info-sub">Glissez un PDF &#8212; obtenez un Gamma en 3 minutes</div>
   </div>
   <div class="drop-zone" id="dropZone">
     <input type="file" id="fileInput" accept=".pdf">
-    <div class="drop-icon">📄</div>
+    <div class="drop-icon">&#128196;</div>
     <h3>Deposez votre PDF ici</h3>
     <p>ou cliquez pour parcourir</p>
   </div>
   <div class="file-selected" id="fileSelected">
-    <span>📎</span><span class="file-name" id="fileName"></span>
+    <span>&#128206;</span><span class="file-name" id="fileName"></span>
   </div>
-  <button class="btn" id="launchBtn" disabled onclick="launch()">📊 Generer le Gamma</button>
+  <button class="btn" id="launchBtn" disabled onclick="launch()">&#128202; Generer le Gamma</button>
   <div class="status loading" id="statusLoading">
     <span class="spinner"></span>Traitement en cours...
     <div class="log-lines" id="logLines"></div>
   </div>
   <div class="status ok" id="statusOk">
-    ✅ Gamma cree avec succes !<br>
-    <a class="result-link" id="gammaLink" href="#" target="_blank">Ouvrir le Gamma →</a><br>
+    Gamma cree avec succes !<br>
+    <a class="result-link" id="gammaLink" href="#" target="_blank">Ouvrir le Gamma &#8594;</a><br>
     <button class="new-btn" onclick="reset()">Traiter un autre PDF</button>
   </div>
   <div class="status error" id="statusError">
@@ -111,7 +111,7 @@ dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remov
 fileInput.addEventListener('change',e=>{if(e.target.files[0])setFile(e.target.files[0]);});
 function setFile(f){selectedFile=f;document.getElementById('fileName').textContent=f.name;document.getElementById('fileSelected').classList.add('visible');document.getElementById('launchBtn').disabled=false;}
 function showStatus(id){['statusLoading','statusOk','statusError'].forEach(s=>document.getElementById(s).classList.remove('visible'));if(id)document.getElementById(id).classList.add('visible');}
-function addLog(msg){const d=document.createElement('div');d.textContent='→ '+msg;document.getElementById('logLines').appendChild(d);}
+function addLog(msg){const d=document.createElement('div');d.textContent='-> '+msg;document.getElementById('logLines').appendChild(d);}
 async function launch(){
   if(!selectedFile)return;
   document.getElementById('launchBtn').disabled=true;
@@ -148,19 +148,44 @@ def index():
     return render_template_string(HTML)
 
 
-@app.route('/generate', methods=['POST'])
-def generate():
+@app.route('/upload', methods=['POST'])
+def upload():
     if 'pdf' not in request.files:
         return jsonify({'error': 'Pas de fichier PDF'}), 400
     f = request.files['pdf']
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     f.save(tmp.name)
     tmp.close()
+    job_id = str(int(time.time()))
+    jobs[job_id] = {'status': 'running', 'step': 0, 'log': [], 'url': ''}
+    t = threading.Thread(target=run_job, args=(job_id, tmp.name))
+    t.daemon = True
+    t.start()
+    return jsonify({'job_id': job_id})
+
+
+@app.route('/status/<job_id>')
+def status(job_id):
+    if job_id not in jobs:
+        return jsonify({'error': 'Job inconnu'}), 404
+    return jsonify(jobs[job_id])
+
+
+def run_job(job_id, pdf_path):
+    def update(step, msg):
+        jobs[job_id]['step'] = step
+        jobs[job_id]['log'].append(msg)
     try:
-        text = extract_text_from_pdf(tmp.name)
+        update(1, 'Extraction du texte...')
+        text = extract_text_from_pdf(pdf_path)
+        update(2, 'Analyse Claude...')
         info = parse_info_with_claude(text)
-        plan_paths, plan_page_idxs = detect_plans_par_texte(tmp.name)
-        photos = extract_photos(tmp.name, plan_page_idxs=plan_page_idxs)
+        update(2, f"Adresse : {info.get('adresse','?')} {info.get('code_postal','')}")
+        update(3, 'Extraction photos...')
+        plan_paths, plan_page_idxs = detect_plans_par_texte(pdf_path)
+        photos = extract_photos(pdf_path, plan_page_idxs=plan_page_idxs)
+        update(3, f"{len(photos)} photos extraites")
+        update(4, 'Upload photos...')
         image_urls = []
         for path in photos[:10]:
             url = upload_image(path)
@@ -169,65 +194,44 @@ def generate():
         for pp in plan_paths:
             url = upload_image(pp)
             if url: plan_urls.append(url)
-        maps_url = upload_maps_image(info["adresse"], info["code_postal"])
+        maps_url = upload_maps_image(info.get('adresse', ''), info.get('code_postal', ''))
+        update(5, 'Construction prompt...')
         prompt = build_prompt(info, image_urls, plan_urls=plan_urls, maps_url=maps_url)
+        update(6, 'Generation Gamma (~2 min)...')
         gamma_url = create_gamma(prompt)
-        return jsonify({'url': gamma_url})
+        jobs[job_id]['status'] = 'done'
+        jobs[job_id]['url'] = gamma_url
+        jobs[job_id]['log'].append('Gamma cree !')
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        jobs[job_id]['status'] = 'error'
+        jobs[job_id]['log'].append(f'Erreur : {str(e)}')
     finally:
-        try: os.unlink(tmp.name)
+        try: os.unlink(pdf_path)
         except: pass
 
 
 def extract_text_from_pdf(pdf_path):
-    try:
-        from pdf2image import convert_from_path
-        import pytesseract
-        ocr_ok = True
-    except ImportError:
-        ocr_ok = False
     parts = []
     with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
+        for page in pdf.pages:
             t = (page.extract_text() or "").strip()
             if len(t) > 20:
                 parts.append(t)
-            elif ocr_ok:
-                try:
-                    imgs = convert_from_path(pdf_path, dpi=200, first_page=i+1, last_page=i+1)
-                    if imgs:
-                        t_ocr = pytesseract.image_to_string(imgs[0], lang="fra").strip()
-                        if len(t_ocr) > 20:
-                            parts.append(t_ocr)
-                except Exception:
-                    pass
-    full_text = "\n\n".join(parts)
-    if len(full_text) < 200 and ocr_ok:
-        try:
-            from pdf2image import convert_from_path
-            import pytesseract
-            imgs = convert_from_path(pdf_path, dpi=250, first_page=1, last_page=3)
-            ocr_parts = [pytesseract.image_to_string(img, lang="fra").strip() for img in imgs if len(pytesseract.image_to_string(img, lang="fra").strip()) > 20]
-            if ocr_parts: full_text = "\n\n".join(ocr_parts)
-        except Exception:
-            pass
-    return full_text
+    return "\n\n".join(parts)
 
 
 def parse_info_with_claude(text):
     prompt = f"""Tu es un expert en immobilier de bureaux parisien.
 Analyse ce descriptif et extrais les informations au format JSON strict. Si absent, mets null.
-Code postal toujours format 750XX. Loyers en €/m²/an uniquement. Surfaces > 100m².
-Divisibilite : "Non divisible" seulement si explicitement mentionné.
+Code postal toujours format 750XX. Loyers en euros/m2/an uniquement. Surfaces > 100m2.
 
-{{"adresse":"55 RUE D'AMSTERDAM","code_postal":"75008","surfaces":["1576 m²"],"loyers":["850 €/m²/an HT HC"],"disponibilite":"Juin 2026","divisibilite":"Divisible à partir de 484 m²","transports":["Gare Saint-Lazare - 1 min"],"prestations":["Climatisation","Fibre optique"],"description":"Description courte","confrere":"JLL","charges":"80 €/m²/an HT","impot_foncier":"25 €/m²/an HT","taxe_bureaux":"21 €/m²/an HT","teom":null,"bail":"3/6/9 ans","depot_garantie":"3 mois de loyer HT","regime_fiscal":"TVA"}}
+{{"adresse":"55 RUE D AMSTERDAM","code_postal":"75008","surfaces":["1576 m2"],"loyers":["850 euros/m2/an HT HC"],"disponibilite":"Juin 2026","divisibilite":"Divisible a partir de 484 m2","transports":["Gare Saint-Lazare - 1 min"],"prestations":["Climatisation","Fibre optique"],"description":"Description courte","confrere":"JLL","charges":"80 euros/m2/an HT","impot_foncier":"25 euros/m2/an HT","taxe_bureaux":"21 euros/m2/an HT","teom":null,"bail":"3/6/9 ans","depot_garantie":"3 mois de loyer HT","regime_fiscal":"TVA"}}
 
 Texte :
 ---
 {text[:8000]}
 ---
-Réponds UNIQUEMENT avec le JSON."""
+Reponds UNIQUEMENT avec le JSON."""
     try:
         r = requests.post("https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
@@ -248,7 +252,7 @@ Réponds UNIQUEMENT avec le JSON."""
                     sx = str(x).strip()
                     if not sx: continue
                     try:
-                        val = float(sx.replace(" ","").replace(",",".").replace("m²","").replace("m2",""))
+                        val = float(sx.replace(" ","").replace(",",".").replace("m2","").replace("m²",""))
                         result.append(f"{int(val)} m²")
                     except:
                         result.append(sx if "m" in sx else sx + " m²")
@@ -259,10 +263,10 @@ Réponds UNIQUEMENT avec le JSON."""
                     sx = str(x).strip()
                     if not sx: continue
                     try:
-                        val = float(sx.replace(" ","").replace(",",".").replace("€","").replace("/m²/an","").replace("HTHC","").strip())
-                        result.append(f"{int(val)} €/m²/an HT HC")
+                        val = float(sx.replace(" ","").replace(",",".").replace("€","").replace("euros","").replace("/m2/an","").replace("/m²/an","").replace("HTHC","").strip())
+                        result.append(f"{int(val)} euros/m2/an HT HC")
                     except:
-                        result.append(sx if "€" in sx else sx)
+                        result.append(sx)
                 return result
             return {"adresse": s(data.get("adresse")).upper(), "code_postal": s(data.get("code_postal")),
                     "surfaces": norm_surfaces(data.get("surfaces")), "loyers": norm_loyers(data.get("loyers")),
@@ -271,9 +275,9 @@ Réponds UNIQUEMENT avec le JSON."""
                     "prestations": [s(x) for x in (data.get("prestations") or []) if x],
                     "description": s(data.get("description")), "confrere": s(data.get("confrere")),
                     "charges": s(data.get("charges"), "Nous consulter"),
-                    "impot_foncier": s(data.get("impot_foncier"), "En cours de détermination"),
-                    "taxe_bureaux": s(data.get("taxe_bureaux"), "En cours de détermination"),
-                    "teom": s(data.get("teom"), "En cours de détermination"),
+                    "impot_foncier": s(data.get("impot_foncier"), "En cours de determination"),
+                    "taxe_bureaux": s(data.get("taxe_bureaux"), "En cours de determination"),
+                    "teom": s(data.get("teom"), "En cours de determination"),
                     "bail": s(data.get("bail"), "3/6/9 ans"),
                     "depot_garantie": s(data.get("depot_garantie"), "3 mois de loyer HT HC"),
                     "regime_fiscal": s(data.get("regime_fiscal"), "TVA")}
@@ -281,18 +285,12 @@ Réponds UNIQUEMENT avec le JSON."""
         pass
     return {"adresse": "", "code_postal": "", "surfaces": [], "loyers": [], "disponibilite": "",
             "divisibilite": "", "transports": [], "prestations": [], "description": "", "confrere": "",
-            "charges": "Nous consulter", "impot_foncier": "En cours de détermination",
-            "taxe_bureaux": "En cours de détermination", "teom": "En cours de détermination",
+            "charges": "Nous consulter", "impot_foncier": "En cours de determination",
+            "taxe_bureaux": "En cours de determination", "teom": "En cours de determination",
             "bail": "3/6/9 ans", "depot_garantie": "3 mois de loyer HT HC", "regime_fiscal": "TVA"}
 
 
 def detect_plans_par_texte(pdf_path, min_kb=30):
-    try:
-        from pdf2image import convert_from_path
-        import pytesseract
-        ocr_ok = True
-    except ImportError:
-        ocr_ok = False
     reader = PdfReader(pdf_path)
     temp_dir = tempfile.mkdtemp()
     plan_paths = []
@@ -300,14 +298,6 @@ def detect_plans_par_texte(pdf_path, min_kb=30):
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
             t = (page.extract_text() or "").strip()
-            if len(t) < 20 and ocr_ok:
-                try:
-                    imgs = convert_from_path(pdf_path, dpi=150, first_page=i+1, last_page=i+1)
-                    if imgs:
-                        w, h = imgs[0].size
-                        t = pytesseract.image_to_string(imgs[0].crop((0, 0, w, h // 3)), lang="fra").strip()
-                except Exception:
-                    pass
             lignes = [l.strip() for l in t.split("\n") if l.strip()]
             titre = " ".join(lignes[:8]).lower()
             if not re.search(r"\bplan\b", titre): continue
@@ -398,27 +388,22 @@ DISPONIBILITE : {dispo}
 DESCRIPTION : {desc}
 TRANSPORTS : {trans}
 PRESTATIONS : {prest}
-PAGE 4 — COUTS RECURRENTS :
+PAGE 4 COUTS RECURRENTS :
 Loyer bureaux : {loyers}
 Charges bureaux : {info.get('charges', 'Nous consulter')}
-Impôt foncier : {info.get('impot_foncier', 'En cours de détermination')}
-Taxe bureaux : {info.get('taxe_bureaux', 'En cours de détermination')}
-TEOM : {info.get('teom', 'En cours de détermination')}
-PAGE 4 — COUTS A L ENTREE :
-Honoraires de location : A la charge du preneur
-Frais de rédaction d'actes : A la charge du preneur
-Frais d'état des lieux : A prévoir
-PAGE 4 — DONNEES JURIDIQUES :
+Impot foncier : {info.get('impot_foncier', 'En cours de determination')}
+Taxe bureaux : {info.get('taxe_bureaux', 'En cours de determination')}
+TEOM : {info.get('teom', 'En cours de determination')}
+PAGE 4 DONNEES JURIDIQUES :
 Bail : {info.get('bail', '3/6/9 ans')}
-Régime fiscal : {info.get('regime_fiscal', 'TVA')}
-Dépôt de garantie : {info.get('depot_garantie', '3 mois de loyer HT HC')}
+Regime fiscal : {info.get('regime_fiscal', 'TVA')}
+Depot de garantie : {info.get('depot_garantie', '3 mois de loyer HT HC')}
 Indexation annuelle : ILAT
-Type de paiement : Trimestriel et d'avance
 {photos}
 {plans}
 {maps_s}
 TITRE : {adresse} — {cp} PARIS — {surfaces}
-INSTRUCTIONS : Code postal toujours {cp}. Ne pas inclure logos confrères."""
+INSTRUCTIONS : Code postal toujours {cp}. Ne pas inclure logos confreres."""
 
 
 def create_gamma(prompt):
@@ -440,8 +425,8 @@ def create_gamma(prompt):
             if result.get("status") == "completed":
                 return result.get("gammaUrl", "")
             elif result.get("status") == "failed":
-                raise Exception(f"Génération échouée: {result}")
-    raise Exception("Timeout après 5 minutes.")
+                raise Exception(f"Generation echouee: {result}")
+    raise Exception("Timeout apres 5 minutes.")
 
 
 if __name__ == '__main__':
