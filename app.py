@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Equation SIE — PDF → Gamma
+Equation SIE — PDF -> Gamma
 Architecture asynchrone avec polling
+Fixes : skip page 1 (logo confrere), surfaces par etage, extraction photos amelioree
 """
 import os, json, re, base64, tempfile, time, io, threading
 import requests
@@ -181,7 +182,9 @@ def run_job(job_id, pdf_path):
         update(2, 'Analyse Claude...')
         info = parse_info_with_claude(text)
         update(2, f"Adresse : {info.get('adresse','?')} {info.get('code_postal','')}")
-        update(3, 'Extraction photos...')
+        surfaces_log = ' | '.join(info.get('surfaces_detail', info.get('surfaces', [])))
+        update(2, f"Surfaces : {surfaces_log or 'Non trouvees'}")
+        update(3, 'Extraction photos (skip page 1)...')
         plan_paths, plan_page_idxs = detect_plans_par_texte(pdf_path)
         photos = extract_photos(pdf_path, plan_page_idxs=plan_page_idxs)
         update(3, f"{len(photos)} photos extraites")
@@ -195,6 +198,7 @@ def run_job(job_id, pdf_path):
             url = upload_image(pp)
             if url: plan_urls.append(url)
         maps_url = upload_maps_image(info.get('adresse', ''), info.get('code_postal', ''))
+        update(4, f"{len(image_urls)} photos uploadees | Maps: {'OK' if maps_url else 'KO'}")
         update(5, 'Construction prompt...')
         prompt = build_prompt(info, image_urls, plan_urls=plan_urls, maps_url=maps_url)
         update(6, 'Generation Gamma (~2 min)...')
@@ -223,9 +227,20 @@ def extract_text_from_pdf(pdf_path):
 def parse_info_with_claude(text):
     prompt = f"""Tu es un expert en immobilier de bureaux parisien.
 Analyse ce descriptif et extrais les informations au format JSON strict. Si absent, mets null.
-Code postal toujours format 750XX. Loyers en euros/m2/an uniquement. Surfaces > 100m2.
+Code postal toujours format 750XX.
 
-{{"adresse":"55 RUE D AMSTERDAM","code_postal":"75008","surfaces":["1576 m2"],"loyers":["850 euros/m2/an HT HC"],"disponibilite":"Juin 2026","divisibilite":"Divisible a partir de 484 m2","transports":["Gare Saint-Lazare - 1 min"],"prestations":["Climatisation","Fibre optique"],"description":"Description courte","confrere":"JLL","charges":"80 euros/m2/an HT","impot_foncier":"25 euros/m2/an HT","taxe_bureaux":"21 euros/m2/an HT","teom":null,"bail":"3/6/9 ans","depot_garantie":"3 mois de loyer HT","regime_fiscal":"TVA"}}
+IMPORTANT pour les surfaces : si plusieurs lots ou etages, liste chaque lot separement avec son etage et son loyer.
+Exemple avec plusieurs lots : "surfaces_detail": ["301 m2 (6eme etage) - 750 euros/m2/an", "426 m2 (3eme etage) - 850 euros/m2/an"]
+Exemple avec un seul lot : "surfaces_detail": ["295 m2 (RdC)"]
+
+{{"adresse":"55 RUE D AMSTERDAM","code_postal":"75008",
+"surfaces":["1576 m2"],"surfaces_detail":["1576 m2 (2eme etage) - 850 euros/m2/an"],
+"loyers":["850 euros/m2/an HT HC"],"disponibilite":"Juin 2026",
+"divisibilite":"Divisible a partir de 484 m2","transports":["Gare Saint-Lazare - 1 min"],
+"prestations":["Climatisation","Fibre optique"],"description":"Description courte",
+"confrere":"JLL","charges":"80 euros/m2/an HT","impot_foncier":"25 euros/m2/an HT",
+"taxe_bureaux":"21 euros/m2/an HT","teom":null,"bail":"3/6/9 ans",
+"depot_garantie":"3 mois de loyer HT","regime_fiscal":"TVA"}}
 
 Texte :
 ---
@@ -235,7 +250,7 @@ Reponds UNIQUEMENT avec le JSON."""
     try:
         r = requests.post("https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 1000, "messages": [{"role": "user", "content": prompt}]},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 1200, "messages": [{"role": "user", "content": prompt}]},
             timeout=30)
         if r.status_code == 200:
             raw = r.json()["content"][0]["text"].strip()
@@ -263,40 +278,52 @@ Reponds UNIQUEMENT avec le JSON."""
                     sx = str(x).strip()
                     if not sx: continue
                     try:
-                        val = float(sx.replace(" ","").replace(",",".").replace("€","").replace("euros","").replace("/m2/an","").replace("/m²/an","").replace("HTHC","").strip())
+                        val = float(sx.replace(" ","").replace(",",".").replace("euros","").replace("€","").replace("/m2/an","").replace("/m²/an","").replace("HTHC","").strip())
                         result.append(f"{int(val)} euros/m2/an HT HC")
                     except:
                         result.append(sx)
                 return result
-            return {"adresse": s(data.get("adresse")).upper(), "code_postal": s(data.get("code_postal")),
-                    "surfaces": norm_surfaces(data.get("surfaces")), "loyers": norm_loyers(data.get("loyers")),
-                    "disponibilite": s(data.get("disponibilite")), "divisibilite": s(data.get("divisibilite")),
-                    "transports": [s(x) for x in (data.get("transports") or []) if x],
-                    "prestations": [s(x) for x in (data.get("prestations") or []) if x],
-                    "description": s(data.get("description")), "confrere": s(data.get("confrere")),
-                    "charges": s(data.get("charges"), "Nous consulter"),
-                    "impot_foncier": s(data.get("impot_foncier"), "En cours de determination"),
-                    "taxe_bureaux": s(data.get("taxe_bureaux"), "En cours de determination"),
-                    "teom": s(data.get("teom"), "En cours de determination"),
-                    "bail": s(data.get("bail"), "3/6/9 ans"),
-                    "depot_garantie": s(data.get("depot_garantie"), "3 mois de loyer HT HC"),
-                    "regime_fiscal": s(data.get("regime_fiscal"), "TVA")}
+            return {
+                "adresse": s(data.get("adresse")).upper(),
+                "code_postal": s(data.get("code_postal")),
+                "surfaces": norm_surfaces(data.get("surfaces")),
+                "surfaces_detail": [s(x) for x in (data.get("surfaces_detail") or []) if x],
+                "loyers": norm_loyers(data.get("loyers")),
+                "disponibilite": s(data.get("disponibilite")),
+                "divisibilite": s(data.get("divisibilite")),
+                "transports": [s(x) for x in (data.get("transports") or []) if x],
+                "prestations": [s(x) for x in (data.get("prestations") or []) if x],
+                "description": s(data.get("description")),
+                "confrere": s(data.get("confrere")),
+                "charges": s(data.get("charges"), "Nous consulter"),
+                "impot_foncier": s(data.get("impot_foncier"), "En cours de determination"),
+                "taxe_bureaux": s(data.get("taxe_bureaux"), "En cours de determination"),
+                "teom": s(data.get("teom"), "En cours de determination"),
+                "bail": s(data.get("bail"), "3/6/9 ans"),
+                "depot_garantie": s(data.get("depot_garantie"), "3 mois de loyer HT HC"),
+                "regime_fiscal": s(data.get("regime_fiscal"), "TVA"),
+            }
     except Exception:
         pass
-    return {"adresse": "", "code_postal": "", "surfaces": [], "loyers": [], "disponibilite": "",
-            "divisibilite": "", "transports": [], "prestations": [], "description": "", "confrere": "",
-            "charges": "Nous consulter", "impot_foncier": "En cours de determination",
-            "taxe_bureaux": "En cours de determination", "teom": "En cours de determination",
-            "bail": "3/6/9 ans", "depot_garantie": "3 mois de loyer HT HC", "regime_fiscal": "TVA"}
+    return {
+        "adresse": "", "code_postal": "", "surfaces": [], "surfaces_detail": [],
+        "loyers": [], "disponibilite": "", "divisibilite": "", "transports": [],
+        "prestations": [], "description": "", "confrere": "",
+        "charges": "Nous consulter", "impot_foncier": "En cours de determination",
+        "taxe_bureaux": "En cours de determination", "teom": "En cours de determination",
+        "bail": "3/6/9 ans", "depot_garantie": "3 mois de loyer HT HC", "regime_fiscal": "TVA",
+    }
 
 
 def detect_plans_par_texte(pdf_path, min_kb=30):
+    """Detecte les pages de plans (contenant le mot 'plan' dans le titre)."""
     reader = PdfReader(pdf_path)
     temp_dir = tempfile.mkdtemp()
     plan_paths = []
     plan_page_idxs = set()
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
+            if i == 0: continue  # FIX 1 : skip page 1 (logo confrere)
             t = (page.extract_text() or "").strip()
             lignes = [l.strip() for l in t.split("\n") if l.strip()]
             titre = " ".join(lignes[:8]).lower()
@@ -323,11 +350,18 @@ def detect_plans_par_texte(pdf_path, min_kb=30):
     return plan_paths, plan_page_idxs
 
 
-def extract_photos(pdf_path, plan_page_idxs=None, min_kb=20):
+def extract_photos(pdf_path, plan_page_idxs=None, min_kb=15):
+    """
+    FIX 1 : skip page 0 (logo confrere en page 1)
+    FIX 3 : fallback pdfplumber pour les PDFs sans images embarquees pypdf
+    """
     reader = PdfReader(pdf_path)
     temp_dir = tempfile.mkdtemp()
     paths = []
-    skip = plan_page_idxs or set()
+    skip = set(plan_page_idxs or set())
+    skip.add(0)  # FIX 1 : toujours ignorer la page 1 (index 0)
+
+    # Methode 1 : pypdf (JPEG embarques)
     for pn, page in enumerate(reader.pages):
         if pn in skip: continue
         for idx, img in enumerate(page.images):
@@ -337,16 +371,49 @@ def extract_photos(pdf_path, plan_page_idxs=None, min_kb=20):
                 w, h = pil.size
                 if w < 200 or h < 150: continue
                 path = os.path.join(temp_dir, f"photo_p{pn+1}_{idx}.jpg")
-                pil.convert("RGB").save(path, "JPEG", quality=88)
+                pil.convert("RGB").save(path, "JPEG", quality=85)
                 paths.append(path)
             except Exception: pass
-    return paths
+
+    # FIX 3 : Methode 2 fallback pdfplumber si peu/pas d'images trouvees
+    if len(paths) < 3:
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for pn, page in enumerate(pdf.pages):
+                    if pn in skip: continue
+                    for idx, img in enumerate(page.images or []):
+                        try:
+                            # pdfplumber retourne les coords de l'image — on crop la page
+                            x0 = img.get('x0', 0)
+                            y0 = img.get('top', 0)
+                            x1 = img.get('x1', page.width)
+                            y1 = img.get('bottom', page.height)
+                            w_img = x1 - x0
+                            h_img = y1 - y0
+                            if w_img < 200 or h_img < 150: continue
+                            # Rasteriser la page entiere si besoin
+                            pil_page = page.to_image(resolution=120).original
+                            # Calculer le ratio page -> pixels
+                            pw, ph = pil_page.size
+                            rx = pw / page.width
+                            ry = ph / page.height
+                            crop = pil_page.crop((x0*rx, y0*ry, x1*rx, y1*ry))
+                            if crop.width < 200 or crop.height < 150: continue
+                            path = os.path.join(temp_dir, f"photo_plumber_p{pn+1}_{idx}.jpg")
+                            crop.convert("RGB").save(path, "JPEG", quality=85)
+                            if path not in paths:
+                                paths.append(path)
+                        except Exception: pass
+        except Exception: pass
+
+    return paths[:12]  # max 12 photos
 
 
 def upload_image(path):
     with open(path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("utf-8")
-    r = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": encoded}, timeout=30)
+    r = requests.post("https://api.imgbb.com/1/upload",
+                      data={"key": IMGBB_API_KEY, "image": encoded}, timeout=30)
     return r.json()["data"]["url"] if r.status_code == 200 else None
 
 
@@ -354,13 +421,15 @@ def upload_maps_image(adresse, code_postal):
     if not adresse: return None
     adresse_complete = f"{adresse}, {code_postal} Paris, France"
     params = {"center": adresse_complete, "zoom": "16", "size": "800x600",
-              "maptype": "roadmap", "markers": f"color:red|{adresse_complete}", "key": GOOGLE_MAPS_API_KEY}
+              "maptype": "roadmap", "markers": f"color:red|{adresse_complete}",
+              "key": GOOGLE_MAPS_API_KEY}
     query = "&".join(f"{k}={requests.utils.quote(str(v))}" for k, v in params.items())
     try:
         r = requests.get(f"https://maps.googleapis.com/maps/api/staticmap?{query}", timeout=20)
         if r.status_code != 200: return None
         encoded = base64.b64encode(r.content).decode("utf-8")
-        r2 = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY, "image": encoded}, timeout=30)
+        r2 = requests.post("https://api.imgbb.com/1/upload",
+                           data={"key": IMGBB_API_KEY, "image": encoded}, timeout=30)
         return r2.json()["data"]["url"] if r2.status_code == 200 else None
     except Exception: return None
 
@@ -368,41 +437,48 @@ def upload_maps_image(adresse, code_postal):
 def build_prompt(info, image_urls, plan_urls=None, maps_url=None):
     adresse  = info.get("adresse") or "Adresse a preciser"
     cp       = info.get("code_postal", "")
-    surfaces = " / ".join(info.get("surfaces", [])) or "A preciser"
+    # FIX 2 : utiliser surfaces_detail si disponible
+    surfaces_detail = info.get("surfaces_detail", [])
+    surfaces_simple = " / ".join(info.get("surfaces", [])) or "A preciser"
+    if surfaces_detail:
+        surfaces_bloc = "\n".join(f"  - {s}" for s in surfaces_detail)
+        surfaces_txt = f"DETAIL DES SURFACES :\n{surfaces_bloc}\n  Total : {surfaces_simple}"
+    else:
+        surfaces_txt = f"SURFACE : {surfaces_simple}"
     loyers   = " | ".join(info.get("loyers", [])) or "Nous consulter"
     dispo    = info.get("disponibilite") or "A preciser"
     div      = info.get("divisibilite", "")
     desc     = info.get("description") or "Bureau de qualite dans un immeuble moderne."
     trans    = "\n".join(f"- {t}" for t in info.get("transports", [])) or "- A completer"
     prest    = "\n".join(f"- {p}" for p in info.get("prestations", [])) or "- A completer"
-    photos   = ("PHOTOS :\n" + "\n".join(f"- {u}" for u in image_urls[:10])) if image_urls else ""
+    photos   = ("PHOTOS :\n" + "\n".join(f"- {u}" for u in image_urls[:12])) if image_urls else ""
     plans    = ("PLANS :\n" + "\n".join(f"- {u}" for u in plan_urls)) if plan_urls else ""
     maps_s   = f"CARTE 300m :\n- {maps_url}" if maps_url else ""
     return f"""Utilise la structure exacte de ce template pour creer un nouveau descriptif immobilier.
 Conserve le logo Equation SIE, la mise en page, et la derniere page de contact sans les modifier.
 ADRESSE : {adresse}
 LOCALISATION : {adresse}, {cp} PARIS
-SURFACE : {surfaces}
+{surfaces_txt}
 DISPONIBILITE : {dispo}
 {f"DIVISIBILITE : {div}" if div else ""}
 DESCRIPTION : {desc}
-TRANSPORTS : {trans}
-PRESTATIONS : {prest}
+TRANSPORTS :
+{trans}
+PRESTATIONS :
+{prest}
 PAGE 4 COUTS RECURRENTS :
 Loyer bureaux : {loyers}
 Charges bureaux : {info.get('charges', 'Nous consulter')}
 Impot foncier : {info.get('impot_foncier', 'En cours de determination')}
 Taxe bureaux : {info.get('taxe_bureaux', 'En cours de determination')}
-TEOM : {info.get('teom', 'En cours de determination')}
 PAGE 4 DONNEES JURIDIQUES :
 Bail : {info.get('bail', '3/6/9 ans')}
 Regime fiscal : {info.get('regime_fiscal', 'TVA')}
 Depot de garantie : {info.get('depot_garantie', '3 mois de loyer HT HC')}
-Indexation annuelle : ILAT
 {photos}
 {plans}
 {maps_s}
-TITRE : {adresse} — {cp} PARIS — {surfaces}
+TITRE : {adresse} — {cp} PARIS — {surfaces_simple}
 INSTRUCTIONS : Code postal toujours {cp}. Ne pas inclure logos confreres."""
 
 
