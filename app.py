@@ -512,7 +512,12 @@ def build_prompt(info, image_urls, plan_urls=None, maps_url=None):
     titre    = f"[RENDER - A RETRAVAILLER] {adresse} — {cp} PARIS — {surfaces_simple}"
 
     return f"""Utilise la structure exacte de ce template pour creer un nouveau descriptif immobilier.
-Conserve le logo Equation SIE, la mise en page, et la derniere page de contact sans les modifier.
+REGLES ABSOLUES A RESPECTER :
+- Conserver EXACTEMENT la mise en page du template sans aucune modification
+- Conserver le logo Equation SIE A SA TAILLE ORIGINALE dans le template, ne pas l'agrandir
+- La page de couverture doit garder le logo petit, en haut a droite uniquement
+- Conserver la derniere page de contact sans modification
+- Ne jamais dupliquer ou redimensionner le logo
 ADRESSE : {adresse}
 LOCALISATION : {adresse}, {cp} PARIS
 {surfaces_txt}
@@ -536,7 +541,11 @@ Depot de garantie : {info.get('depot_garantie', '3 mois de loyer HT HC')}
 {plans}
 {maps_s}
 TITRE : {titre}
-INSTRUCTIONS : Code postal toujours {cp}. Ne pas inclure logos confreres. Le titre doit commencer par [RENDER - A RETRAVAILLER]."""
+INSTRUCTIONS FINALES :
+- Code postal toujours {cp}, jamais "Paris Xe"
+- Ne pas inclure logos des confreres (Knight Frank, CBRE, JLL, BNP, Cushman)
+- Le titre doit commencer par [RENDER - A RETRAVAILLER]
+- Logo Equation SIE : conserver uniquement celui du template, a sa taille originale, ne pas l'agrandir ni le dupliquer"""
 
 
 def create_gamma(prompt):
