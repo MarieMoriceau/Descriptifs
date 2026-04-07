@@ -5,7 +5,7 @@ Equation SIE — PDF -> Gamma
 - Multi-PDF simultanes avec suivi par fichier
 - Skip page 1 (logo confrere)
 - Surfaces par etage
-- Extraction photos amelioree
+- Extraction photos pypdf uniquement (pas de rasterisation = pas de crash memoire)
 """
 import os, json, re, base64, tempfile, time, io, threading
 import requests
@@ -146,7 +146,7 @@ function renderFilesList() {
   ).join('');
   document.getElementById('launchBtn').disabled = false;
   const n = selectedFiles.length;
-  document.getElementById('launchBtn').textContent = n > 1
+  document.getElementById('launchBtn').innerHTML = n > 1
     ? `&#128202; Generer ${n} Gammas en parallele`
     : '&#128202; Generer le Gamma';
 }
@@ -181,7 +181,6 @@ async function launch() {
     }
   }
 
-  // Lancer le polling global
   if (Object.keys(activeJobs).length > 0) startPolling();
 }
 
@@ -190,8 +189,9 @@ function updateJob(fname, status, logMsg, gammaUrl) {
   if (!el) return;
   el.className = 'job-item ' + status;
   const spinner = status === 'running' ? '<span class="spinner"></span>' : '';
-  const link = gammaUrl ? `<br><a class="gamma-link" href="${gammaUrl}" target="_blank">Ouvrir le Gamma →</a>` : '';
-  el.innerHTML = `<div class="job-name">&#128196; ${fname}</div><div class="job-log">${spinner}${logMsg}${link}</div>`;
+  const icon = status === 'done' ? '&#10003; ' : status === 'error' ? '&#10005; ' : '';
+  const link = gammaUrl ? `<br><a class="gamma-link" href="${gammaUrl}" target="_blank">Ouvrir le Gamma &#8594;</a>` : '';
+  el.innerHTML = `<div class="job-name">&#128196; ${fname}</div><div class="job-log">${spinner}${icon}${logMsg}${link}</div>`;
 }
 
 function startPolling() {
@@ -201,7 +201,7 @@ function startPolling() {
     if (remaining.length === 0) {
       clearInterval(pollInterval);
       document.getElementById('launchBtn').disabled = false;
-      document.getElementById('launchBtn').textContent = '&#128202; Generer de nouveaux Gammas';
+      document.getElementById('launchBtn').innerHTML = '&#128202; Generer de nouveaux Gammas';
       selectedFiles = [];
       renderFilesList();
       return;
@@ -213,10 +213,10 @@ function startPolling() {
         const fname = activeJobs[jobId];
         const lastLog = data.log?.[data.log.length - 1] || '...';
         if (data.status === 'done') {
-          updateJob(fname, 'done', '&#10003; Gamma cree !', data.url);
+          updateJob(fname, 'done', 'Gamma cree !', data.url);
           delete activeJobs[jobId];
         } else if (data.status === 'error') {
-          updateJob(fname, 'error', '&#10005; ' + lastLog);
+          updateJob(fname, 'error', lastLog);
           delete activeJobs[jobId];
         } else {
           updateJob(fname, 'running', lastLog);
@@ -244,7 +244,7 @@ def upload():
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
     f.save(tmp.name)
     tmp.close()
-    job_id = f"{int(time.time())}_{filename[:20]}"
+    job_id = f"{int(time.time())}_{re.sub(r'[^a-zA-Z0-9]', '_', filename[:20])}"
     jobs[job_id] = {'status': 'running', 'step': 0, 'log': [], 'url': '', 'filename': filename}
     t = threading.Thread(target=run_job, args=(job_id, tmp.name, filename))
     t.daemon = True
@@ -332,7 +332,8 @@ Texte :
 Reponds UNIQUEMENT avec le JSON."""
     try:
         r = requests.post("https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
             json={"model": "claude-haiku-4-5-20251001", "max_tokens": 1200,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=30)
@@ -362,8 +363,9 @@ Reponds UNIQUEMENT avec le JSON."""
                     sx = str(x).strip()
                     if not sx: continue
                     try:
-                        val = float(sx.replace(" ","").replace(",",".").replace("euros","").replace("€","")
-                                      .replace("/m2/an","").replace("/m²/an","").replace("HTHC","").strip())
+                        val = float(sx.replace(" ","").replace(",",".").replace("euros","")
+                                      .replace("€","").replace("/m2/an","").replace("/m²/an","")
+                                      .replace("HTHC","").strip())
                         result.append(f"{int(val)} euros/m2/an HT HC")
                     except:
                         result.append(sx)
@@ -401,13 +403,14 @@ Reponds UNIQUEMENT avec le JSON."""
 
 
 def detect_plans_par_texte(pdf_path, min_kb=30):
+    """Detecte les pages de plans — skip page 0 (logo confrere)."""
     reader = PdfReader(pdf_path)
     temp_dir = tempfile.mkdtemp()
     plan_paths = []
     plan_page_idxs = set()
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
-            if i == 0: continue  # skip page 1 logo
+            if i == 0: continue  # skip page 1 logo confrere
             t = (page.extract_text() or "").strip()
             lignes = [l.strip() for l in t.split("\n") if l.strip()]
             titre = " ".join(lignes[:8]).lower()
@@ -435,13 +438,17 @@ def detect_plans_par_texte(pdf_path, min_kb=30):
 
 
 def extract_photos(pdf_path, plan_page_idxs=None, min_kb=15):
+    """
+    Extraction photos via pypdf uniquement — pas de rasterisation PDF
+    pour eviter les crashes memoire sur Render plan gratuit (512 Mo).
+    Skip page 0 (logo confrere page 1).
+    """
     reader = PdfReader(pdf_path)
     temp_dir = tempfile.mkdtemp()
     paths = []
     skip = set(plan_page_idxs or set())
-    skip.add(0)  # skip page 1 (logo confrere)
+    skip.add(0)  # toujours ignorer la page 1
 
-    # Methode 1 : pypdf
     for pn, page in enumerate(reader.pages):
         if pn in skip: continue
         for idx, img in enumerate(page.images):
@@ -454,29 +461,6 @@ def extract_photos(pdf_path, plan_page_idxs=None, min_kb=15):
                 pil.convert("RGB").save(path, "JPEG", quality=85)
                 paths.append(path)
             except Exception: pass
-
-    # Methode 2 fallback pdfplumber si peu d'images
-    if len(paths) < 3:
-        try:
-            with pdfplumber.open(pdf_path) as pdf:
-                for pn, page in enumerate(pdf.pages):
-                    if pn in skip: continue
-                    for idx, img in enumerate(page.images or []):
-                        try:
-                            x0, y0 = img.get('x0', 0), img.get('top', 0)
-                            x1, y1 = img.get('x1', page.width), img.get('bottom', page.height)
-                            if (x1-x0) < 200 or (y1-y0) < 150: continue
-                            pil_page = page.to_image(resolution=120).original
-                            pw, ph = pil_page.size
-                            rx, ry = pw / page.width, ph / page.height
-                            crop = pil_page.crop((x0*rx, y0*ry, x1*rx, y1*ry))
-                            if crop.width < 200 or crop.height < 150: continue
-                            path = os.path.join(temp_dir, f"photo_plumber_p{pn+1}_{idx}.jpg")
-                            crop.convert("RGB").save(path, "JPEG", quality=85)
-                            if path not in paths:
-                                paths.append(path)
-                        except Exception: pass
-        except Exception: pass
 
     return paths[:12]
 
@@ -525,9 +509,7 @@ def build_prompt(info, image_urls, plan_urls=None, maps_url=None):
     photos   = ("PHOTOS :\n" + "\n".join(f"- {u}" for u in image_urls[:12])) if image_urls else ""
     plans    = ("PLANS :\n" + "\n".join(f"- {u}" for u in plan_urls)) if plan_urls else ""
     maps_s   = f"CARTE 300m :\n- {maps_url}" if maps_url else ""
-
-    # TITRE AUTOMATIQUE avec marqueur Render
-    titre = f"[RENDER - A RETRAVAILLER] {adresse} — {cp} PARIS — {surfaces_simple}"
+    titre    = f"[RENDER - A RETRAVAILLER] {adresse} — {cp} PARIS — {surfaces_simple}"
 
     return f"""Utilise la structure exacte de ce template pour creer un nouveau descriptif immobilier.
 Conserve le logo Equation SIE, la mise en page, et la derniere page de contact sans les modifier.
