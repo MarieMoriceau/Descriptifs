@@ -30,7 +30,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # ─── JOB STORE ───────────────────────────────────────────────────────────────
 jobs = {}
 
-# ─── HTML ────────────────────────────────────────────────────────────────────
+# ─── HTML TEMPLATE ───────────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -91,7 +91,7 @@ function uploadFiles() {
   const btn = document.getElementById('upload-btn');
   if (!input.files.length) { alert('Sélectionnez au moins un PDF.'); return; }
   btn.disabled = true;
-  btn.textContent = '⏳ Envoi en cours...';
+  btn.textContent = 'Envoi en cours...';
   Array.from(input.files).forEach(file => {
     const formData = new FormData();
     formData.append('file', file);
@@ -110,31 +110,31 @@ function addJobCard(jobId, filename) {
   const div = document.createElement('div');
   div.className = 'job-item running';
   div.id = 'job-' + jobId;
-  div.innerHTML = '<div class="job-title">' + filename + ' <span class="status-badge badge-running" id="badge-' + jobId + '">⏳ En cours</span></div><div class="job-logs" id="logs-' + jobId + '">Démarrage...</div><div id="link-' + jobId + '"></div>';
+  div.innerHTML = '<div class="job-title">' + filename + ' <span class="status-badge badge-running" id="badge-' + jobId + '">En cours</span></div><div class="job-logs" id="logs-' + jobId + '">Démarrage...</div><div id="link-' + jobId + '"></div>';
   container.prepend(div);
-  polls[jobId] = setInterval(() => pollJob(jobId), 3000);
+  polls[jobId] = setInterval(function() { pollJob(jobId); }, 3000);
 }
 function pollJob(jobId) {
   fetch('/status/' + jobId)
     .then(r => r.json())
     .then(data => {
-      const card = document.getElementById('job-' + jobId);
-      const badge = document.getElementById('badge-' + jobId);
-      const logs = document.getElementById('logs-' + jobId);
-      const linkDiv = document.getElementById('link-' + jobId);
-      logs.textContent = (data.logs || []).join('\\n');
+      var logs = document.getElementById('logs-' + jobId);
+      var badge = document.getElementById('badge-' + jobId);
+      var card = document.getElementById('job-' + jobId);
+      var linkDiv = document.getElementById('link-' + jobId);
+      logs.textContent = (data.logs || []).join('\n');
       logs.scrollTop = logs.scrollHeight;
       if (data.status === 'done') {
         clearInterval(polls[jobId]);
         card.className = 'job-item done';
         badge.className = 'status-badge badge-done';
-        badge.textContent = '✅ Terminé';
-        if (data.gamma_url) linkDiv.innerHTML = '<a class="gamma-link" href="' + data.gamma_url + '" target="_blank">🎨 Ouvrir dans Gamma</a>';
+        badge.textContent = 'Terminé';
+        if (data.gamma_url) linkDiv.innerHTML = '<a class="gamma-link" href="' + data.gamma_url + '" target="_blank">Ouvrir dans Gamma</a>';
       } else if (data.status === 'error') {
         clearInterval(polls[jobId]);
         card.className = 'job-item error';
         badge.className = 'status-badge badge-error';
-        badge.textContent = '❌ Erreur';
+        badge.textContent = 'Erreur';
       }
     });
 }
@@ -158,7 +158,7 @@ def upload():
     job_id = str(uuid.uuid4())
     path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     f.save(path)
-    jobs[job_id] = {"status": "running", "logs": ["📄 PDF reçu, démarrage..."], "gamma_url": None, "filename": f.filename}
+    jobs[job_id] = {"status": "running", "logs": ["PDF reçu, démarrage..."], "gamma_url": None, "filename": f.filename}
     threading.Thread(target=run_job, args=(job_id, path), daemon=True).start()
     return jsonify({"job_id": job_id})
 
@@ -178,21 +178,21 @@ def log(job_id, msg):
 
 def run_job(job_id, pdf_path):
     try:
-        log(job_id, "📝 Extraction du texte (skip page 0)...")
+        log(job_id, "Extraction du texte (skip page 0)...")
         text = extract_text(pdf_path)
 
-        log(job_id, "🤖 Analyse via Claude Haiku...")
+        log(job_id, "Analyse via Claude Haiku...")
         data = extract_data_with_claude(text)
         surface_info = data.get('surfaces', ['?'])[0] if data.get('surfaces') else '?'
-        log(job_id, f"✅ {data.get('adresse', '?')} — {surface_info}")
+        log(job_id, f"Données extraites : {data.get('adresse', '?')} — {surface_info}")
 
-        log(job_id, "🖼️  Extraction des photos PDF...")
+        log(job_id, "Extraction des photos PDF...")
         photos = extract_photos(pdf_path)
-        log(job_id, f"✅ {len(photos)} photo(s) trouvée(s)")
+        log(job_id, f"{len(photos)} photo(s) trouvée(s)")
 
         photo_urls = []
         for i, img_bytes in enumerate(photos[:6]):
-            log(job_id, f"☁️  Upload photo {i+1}/{min(len(photos), 6)}...")
+            log(job_id, f"Upload photo {i+1}/{min(len(photos), 6)}...")
             url = upload_to_imgbb(img_bytes)
             if url:
                 photo_urls.append(url)
@@ -201,27 +201,27 @@ def run_job(job_id, pdf_path):
         adresse = data.get("adresse", "")
         cp = data.get("code_postal", "")
         if adresse and cp:
-            log(job_id, "🗺️  Génération carte Google Maps...")
+            log(job_id, "Génération carte Google Maps...")
             map_url = get_google_map_url(adresse, cp)
             if map_url:
-                log(job_id, "✅ Carte générée")
+                log(job_id, "Carte générée")
             else:
-                log(job_id, "⚠️  Carte indisponible, on continue sans")
+                log(job_id, "Carte indisponible, on continue sans")
 
-        log(job_id, "✍️  Construction du prompt Gamma...")
+        log(job_id, "Construction du prompt Gamma...")
         gamma_title = build_gamma_title(data)
         gamma_prompt = build_gamma_prompt(data, photo_urls, map_url)
 
-        log(job_id, "🎨 Appel API Gamma...")
+        log(job_id, "Appel API Gamma...")
         gamma_url = call_gamma_api(gamma_title, gamma_prompt)
 
         jobs[job_id]["gamma_url"] = gamma_url
         jobs[job_id]["status"] = "done"
-        log(job_id, "🎉 Terminé !")
+        log(job_id, "Terminé !")
 
     except Exception as e:
         jobs[job_id]["status"] = "error"
-        log(job_id, f"❌ Erreur: {str(e)}")
+        log(job_id, f"Erreur: {str(e)}")
         import traceback
         log(job_id, traceback.format_exc()[:600])
     finally:
@@ -232,7 +232,6 @@ def run_job(job_id, pdf_path):
 
 
 def extract_text(pdf_path):
-    """Extrait le texte en skippant la page 0 (logo confrère)."""
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
@@ -245,15 +244,14 @@ def extract_text(pdf_path):
 
 
 def extract_data_with_claude(text):
-    """Extraction structurée via Claude Haiku — ne retourne QUE ce qui est dans le texte."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = f"""Tu es un expert en immobilier d'entreprise. Extrais les données du descriptif suivant.
 Retourne UNIQUEMENT un JSON valide, sans texte avant ni après, sans balises markdown.
 
-RÈGLES ABSOLUES :
-- N'invente AUCUNE donnée absente du texte source
+REGLES ABSOLUES :
+- N'invente AUCUNE donnee absente du texte source
 - Si une info est absente, mets null
-- Ne déduis pas, ne complètes pas : seulement ce qui est littéralement écrit
+- Ne deduis pas, ne completes pas : seulement ce qui est litteralement ecrit
 
 Format attendu :
 {{
@@ -300,10 +298,6 @@ Texte source :
 
 
 def extract_photos(pdf_path):
-    """
-    Extraction images via pypdf uniquement (pas de rasterisation).
-    Skip page 0. Filtre les images < 200px.
-    """
     photos = []
     reader = PdfReader(pdf_path)
     for page_num, page in enumerate(reader.pages):
@@ -385,7 +379,6 @@ def build_gamma_title(data):
 
 
 def build_gamma_prompt(data, photo_urls, map_url):
-    """Construit le prompt Gamma — uniquement les données présentes, aucune invention."""
     lines = []
 
     adresse = data.get("adresse") or ""
@@ -405,13 +398,13 @@ def build_gamma_prompt(data, photo_urls, map_url):
 
     description = data.get("description")
     if description:
-        lines.append("## Désignation")
+        lines.append("## Designation")
         lines.append(description)
         lines.append("")
 
     dispo = data.get("disponibilite")
     if dispo:
-        lines.append(f"**Disponibilité : {dispo}**")
+        lines.append(f"**Disponibilite : {dispo}**")
         lines.append("")
 
     surfaces_detail = data.get("surfaces_detail") or surfaces
@@ -430,7 +423,7 @@ def build_gamma_prompt(data, photo_urls, map_url):
 
     transports = data.get("transports") or []
     if transports:
-        lines.append("## Accès")
+        lines.append("## Acces")
         for t in transports:
             lines.append(f"- {t}")
         lines.append("")
@@ -448,7 +441,7 @@ def build_gamma_prompt(data, photo_urls, map_url):
 
     has_finance = any([data.get("loyer_annuel"), data.get("loyer_mensuel"), data.get("charges"), data.get("honoraires"), data.get("taxe_bureaux")])
     if has_finance:
-        lines.append("## Conditions financières")
+        lines.append("## Conditions financieres")
         for key, label in [("loyer_annuel", "Loyer"), ("loyer_mensuel", "Loyer mensuel"), ("charges", "Charges"), ("honoraires", "Honoraires"), ("taxe_bureaux", "Taxe bureaux")]:
             val = data.get(key)
             if val:
@@ -456,9 +449,9 @@ def build_gamma_prompt(data, photo_urls, map_url):
         lines.append("")
 
     juridique_keys = ["bail", "regime_fiscal", "depot_garantie", "indexation", "dpe"]
-    juridique_labels = {"bail": "Bail", "regime_fiscal": "Régime fiscal", "depot_garantie": "Dépôt de garantie", "indexation": "Indexation", "dpe": "DPE"}
+    juridique_labels = {"bail": "Bail", "regime_fiscal": "Regime fiscal", "depot_garantie": "Depot de garantie", "indexation": "Indexation", "dpe": "DPE"}
     if any(data.get(k) for k in juridique_keys):
-        lines.append("## Données juridiques")
+        lines.append("## Donnees juridiques")
         for key in juridique_keys:
             val = data.get(key)
             if val:
@@ -466,11 +459,11 @@ def build_gamma_prompt(data, photo_urls, map_url):
         lines.append("")
 
     lines.append("---")
-    lines.append("*Document non contractuel — Equation SIE*")
+    lines.append("Document non contractuel - Equation SIE")
     lines.append("")
     lines.append("CONSIGNES :")
     lines.append("- Logo Equation SIE : taille originale, ne pas agrandir ni dupliquer")
-    lines.append("- Ne pas inclure de logos de confrères")
+    lines.append("- Ne pas inclure de logos de confreres")
     lines.append("- Ne rien ajouter qui ne soit pas dans ce contenu")
 
     return "\n".join(lines)
@@ -510,7 +503,7 @@ def call_gamma_api(title, prompt_text):
     if not generation_id:
         raise ValueError(f"generationId absent: {resp.text[:300]}")
 
-    # Polling jusqu'à completed (max 3 min)
+    # Polling jusqu'a completed (max 3 min)
     for attempt in range(36):
         time.sleep(5)
         poll = requests.get(
@@ -528,9 +521,9 @@ def call_gamma_api(title, prompt_text):
                 raise ValueError(f"gammaUrl absent: {json.dumps(result)[:300]}")
             return gamma_url
         if status == "failed":
-            raise ValueError(f"Génération Gamma échouée: {json.dumps(result)[:300]}")
+            raise ValueError(f"Generation Gamma echouee: {json.dumps(result)[:300]}")
 
-    raise ValueError("Timeout : génération Gamma non terminée après 3 minutes")
+    raise ValueError("Timeout : generation Gamma non terminee apres 3 minutes")
 
 
 if __name__ == "__main__":
