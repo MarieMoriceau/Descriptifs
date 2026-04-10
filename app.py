@@ -512,7 +512,7 @@ def call_gamma_api(title, prompt_text):
 
     payload = {
         "inputText": prompt_text,
-        "textMode": "pasteAndTransform",  # contenu structuré fourni directement
+        "textMode": "preserve",  # contenu structuré fourni directement, Gamma le met en forme sans réécrire
         "format": "presentation",
         "cardDensity": "medium",
         "numCards": 8,
