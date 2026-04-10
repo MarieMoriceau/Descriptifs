@@ -30,7 +30,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # ─── JOB STORE ───────────────────────────────────────────────────────────────
 jobs = {}
 
-# ─── HTML TEMPLATE ───────────────────────────────────────────────────────────
+# ─── HTML ────────────────────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -59,7 +59,7 @@ h1 { font-size: 1.6rem; font-weight: 700; color: #1a1a2e; margin-bottom: 0.4rem;
 .job-item.done { border-color: #86efac; background: #f0fdf4; }
 .job-item.error { border-color: #fca5a5; background: #fff5f5; }
 .job-title { font-weight: 600; margin-bottom: 0.4rem; color: #1a1a2e; }
-.job-logs { font-size: 0.78rem; color: #6b7280; max-height: 100px; overflow-y: auto; margin-top: 0.4rem; font-family: monospace; background: rgba(0,0,0,0.03); padding: 0.4rem; border-radius: 4px; }
+.job-logs { font-size: 0.78rem; color: #6b7280; max-height: 100px; overflow-y: auto; margin-top: 0.4rem; font-family: monospace; background: rgba(0,0,0,0.03); padding: 0.4rem; border-radius: 4px; white-space: pre-wrap; }
 .gamma-link { display: inline-block; margin-top: 0.6rem; padding: 0.4rem 0.9rem; background: #16a34a; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 0.85rem; }
 .status-badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 99px; font-size: 0.75rem; font-weight: 600; margin-left: 0.4rem; }
 .badge-running { background: #dbeafe; color: #1d4ed8; }
@@ -110,11 +110,7 @@ function addJobCard(jobId, filename) {
   const div = document.createElement('div');
   div.className = 'job-item running';
   div.id = 'job-' + jobId;
-  div.innerHTML = `
-    <div class="job-title">${filename} <span class="status-badge badge-running" id="badge-${jobId}">⏳ En cours</span></div>
-    <div class="job-logs" id="logs-${jobId}">Démarrage...</div>
-    <div id="link-${jobId}"></div>
-  `;
+  div.innerHTML = '<div class="job-title">' + filename + ' <span class="status-badge badge-running" id="badge-' + jobId + '">⏳ En cours</span></div><div class="job-logs" id="logs-' + jobId + '">Démarrage...</div><div id="link-' + jobId + '"></div>';
   container.prepend(div);
   polls[jobId] = setInterval(() => pollJob(jobId), 3000);
 }
@@ -133,7 +129,7 @@ function pollJob(jobId) {
         card.className = 'job-item done';
         badge.className = 'status-badge badge-done';
         badge.textContent = '✅ Terminé';
-        if (data.gamma_url) linkDiv.innerHTML = `<a class="gamma-link" href="${data.gamma_url}" target="_blank">🎨 Ouvrir dans Gamma</a>`;
+        if (data.gamma_url) linkDiv.innerHTML = '<a class="gamma-link" href="' + data.gamma_url + '" target="_blank">🎨 Ouvrir dans Gamma</a>';
       } else if (data.status === 'error') {
         clearInterval(polls[jobId]);
         card.className = 'job-item error';
@@ -256,9 +252,8 @@ Retourne UNIQUEMENT un JSON valide, sans texte avant ni après, sans balises mar
 
 RÈGLES ABSOLUES :
 - N'invente AUCUNE donnée absente du texte source
-- Si une info est absente, mets null (jamais une valeur inventée)
+- Si une info est absente, mets null
 - Ne déduis pas, ne complètes pas : seulement ce qui est littéralement écrit
-- Pas de plan, pas de carte si non mentionnés
 
 Format attendu :
 {{
@@ -306,8 +301,8 @@ Texte source :
 
 def extract_photos(pdf_path):
     """
-    Extraction images via pypdf uniquement (pas de rasterisation — évite crash 512Mo Render).
-    Skip page 0. Filtre les petites images < 200px (logos/icônes).
+    Extraction images via pypdf uniquement (pas de rasterisation).
+    Skip page 0. Filtre les images < 200px.
     """
     photos = []
     reader = PdfReader(pdf_path)
@@ -390,10 +385,7 @@ def build_gamma_title(data):
 
 
 def build_gamma_prompt(data, photo_urls, map_url):
-    """
-    Construit le prompt Gamma.
-    RÈGLE STRICTE : inclure uniquement les données présentes (non-null) — aucune invention.
-    """
+    """Construit le prompt Gamma — uniquement les données présentes, aucune invention."""
     lines = []
 
     adresse = data.get("adresse") or ""
@@ -443,43 +435,29 @@ def build_gamma_prompt(data, photo_urls, map_url):
             lines.append(f"- {t}")
         lines.append("")
 
-    # Carte uniquement si effectivement générée
     if map_url:
         lines.append("## Localisation")
         lines.append(f"![Carte]({map_url})")
         lines.append("")
 
-    # Photos uniquement celles extraites du PDF
     if photo_urls:
         lines.append("## Photos")
         for url in photo_urls:
             lines.append(f"![Photo]({url})")
         lines.append("")
 
-    # Conditions financières
-    has_finance = any([
-        data.get("loyer_annuel"), data.get("loyer_mensuel"),
-        data.get("charges"), data.get("honoraires"), data.get("taxe_bureaux")
-    ])
+    has_finance = any([data.get("loyer_annuel"), data.get("loyer_mensuel"), data.get("charges"), data.get("honoraires"), data.get("taxe_bureaux")])
     if has_finance:
         lines.append("## Conditions financières")
-        for key, label in [
-            ("loyer_annuel", "Loyer"), ("loyer_mensuel", "Loyer mensuel"),
-            ("charges", "Charges"), ("honoraires", "Honoraires"), ("taxe_bureaux", "Taxe bureaux")
-        ]:
+        for key, label in [("loyer_annuel", "Loyer"), ("loyer_mensuel", "Loyer mensuel"), ("charges", "Charges"), ("honoraires", "Honoraires"), ("taxe_bureaux", "Taxe bureaux")]:
             val = data.get(key)
             if val:
                 lines.append(f"**{label} : {val}**")
         lines.append("")
 
-    # Données juridiques
     juridique_keys = ["bail", "regime_fiscal", "depot_garantie", "indexation", "dpe"]
-    juridique_labels = {
-        "bail": "Bail", "regime_fiscal": "Régime fiscal",
-        "depot_garantie": "Dépôt de garantie", "indexation": "Indexation", "dpe": "DPE"
-    }
-    has_juridique = any(data.get(k) for k in juridique_keys)
-    if has_juridique:
+    juridique_labels = {"bail": "Bail", "regime_fiscal": "Régime fiscal", "depot_garantie": "Dépôt de garantie", "indexation": "Indexation", "dpe": "DPE"}
+    if any(data.get(k) for k in juridique_keys):
         lines.append("## Données juridiques")
         for key in juridique_keys:
             val = data.get(key)
@@ -490,31 +468,28 @@ def build_gamma_prompt(data, photo_urls, map_url):
     lines.append("---")
     lines.append("*Document non contractuel — Equation SIE*")
     lines.append("")
-    lines.append("CONSIGNES MISE EN FORME :")
-    lines.append("- Logo Equation SIE : conserver à taille originale, ne pas agrandir ni dupliquer")
+    lines.append("CONSIGNES :")
+    lines.append("- Logo Equation SIE : taille originale, ne pas agrandir ni dupliquer")
     lines.append("- Ne pas inclure de logos de confrères")
-    lines.append("- Ne rien ajouter qui ne soit pas dans ce contenu (pas de plan inventé, pas de carte fictive)")
+    lines.append("- Ne rien ajouter qui ne soit pas dans ce contenu")
 
     return "\n".join(lines)
 
 
 def call_gamma_api(title, prompt_text):
     """
-    API Gamma v1.0 (GA novembre 2025)
-    Endpoint : POST https://public-api.gamma.app/v1.0/generations
-    Auth     : X-API-KEY header
-    Async    : poll GET /v1.0/generations/{generationId} jusqu'à status=completed
+    Gamma API v1.0 — POST https://public-api.gamma.app/v1.0/generations
+    Auth : X-API-KEY header
+    Async : poll GET /v1.0/generations/{generationId}
     """
     headers = {
         "X-API-KEY": GAMMA_API_KEY,
         "Content-Type": "application/json",
     }
-
     payload = {
         "inputText": prompt_text,
-        "textMode": "preserve",  # contenu structuré fourni directement, Gamma le met en forme sans réécrire
+        "textMode": "generate",
         "format": "presentation",
-        "cardDensity": "medium",
         "numCards": 8,
     }
     if GAMMA_THEME_ID:
@@ -522,7 +497,6 @@ def call_gamma_api(title, prompt_text):
     if GAMMA_TEMPLATE_ID:
         payload["templateId"] = GAMMA_TEMPLATE_ID
 
-    # 1. Création de la génération
     resp = requests.post(
         "https://public-api.gamma.app/v1.0/generations",
         headers=headers,
@@ -536,7 +510,7 @@ def call_gamma_api(title, prompt_text):
     if not generation_id:
         raise ValueError(f"generationId absent: {resp.text[:300]}")
 
-    # 2. Polling jusqu'à completed (max 3 min)
+    # Polling jusqu'à completed (max 3 min)
     for attempt in range(36):
         time.sleep(5)
         poll = requests.get(
@@ -546,18 +520,15 @@ def call_gamma_api(title, prompt_text):
         )
         if poll.status_code != 200:
             raise ValueError(f"Polling erreur {poll.status_code}: {poll.text[:200]}")
-
-        data = poll.json()
-        status = data.get("status")
-
+        result = poll.json()
+        status = result.get("status")
         if status == "completed":
-            gamma_url = data.get("gammaUrl") or data.get("url")
+            gamma_url = result.get("gammaUrl") or result.get("url")
             if not gamma_url:
-                raise ValueError(f"gammaUrl absent dans la réponse: {json.dumps(data)[:300]}")
+                raise ValueError(f"gammaUrl absent: {json.dumps(result)[:300]}")
             return gamma_url
-
         if status == "failed":
-            raise ValueError(f"Génération Gamma échouée: {json.dumps(data)[:300]}")
+            raise ValueError(f"Génération Gamma échouée: {json.dumps(result)[:300]}")
 
     raise ValueError("Timeout : génération Gamma non terminée après 3 minutes")
 
