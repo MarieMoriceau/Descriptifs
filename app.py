@@ -89,7 +89,7 @@ const polls = {};
 function uploadFiles() {
   const input = document.getElementById('pdf-input');
   const btn = document.getElementById('upload-btn');
-  if (!input.files.length) { alert('Sélectionnez au moins un PDF.'); return; }
+  if (!input.files.length) { alert('Selectionnez au moins un PDF.'); return; }
   btn.disabled = true;
   btn.textContent = 'Envoi en cours...';
   Array.from(input.files).forEach(file => {
@@ -101,7 +101,7 @@ function uploadFiles() {
         if (data.job_id) addJobCard(data.job_id, file.name);
         else alert('Erreur: ' + (data.error || 'inconnue'));
       })
-      .catch(e => alert('Erreur réseau: ' + e));
+      .catch(e => alert('Erreur reseau: ' + e));
   });
   setTimeout(() => { btn.disabled = false; btn.textContent = '🚀 Lancer la conversion'; }, 2000);
 }
@@ -110,7 +110,7 @@ function addJobCard(jobId, filename) {
   const div = document.createElement('div');
   div.className = 'job-item running';
   div.id = 'job-' + jobId;
-  div.innerHTML = '<div class="job-title">' + filename + ' <span class="status-badge badge-running" id="badge-' + jobId + '">En cours</span></div><div class="job-logs" id="logs-' + jobId + '">Démarrage...</div><div id="link-' + jobId + '"></div>';
+  div.innerHTML = '<div class="job-title">' + filename + ' <span class="status-badge badge-running" id="badge-' + jobId + '">En cours</span></div><div class="job-logs" id="logs-' + jobId + '">Demarrage...</div><div id="link-' + jobId + '"></div>';
   container.prepend(div);
   polls[jobId] = setInterval(function() { pollJob(jobId); }, 3000);
 }
@@ -122,13 +122,13 @@ function pollJob(jobId) {
       var badge = document.getElementById('badge-' + jobId);
       var card = document.getElementById('job-' + jobId);
       var linkDiv = document.getElementById('link-' + jobId);
-      logs.textContent = (data.logs || []).join('\n');
+      logs.textContent = (data.logs || []).join('\\n');
       logs.scrollTop = logs.scrollHeight;
       if (data.status === 'done') {
         clearInterval(polls[jobId]);
         card.className = 'job-item done';
         badge.className = 'status-badge badge-done';
-        badge.textContent = 'Terminé';
+        badge.textContent = 'Termine';
         if (data.gamma_url) linkDiv.innerHTML = '<a class="gamma-link" href="' + data.gamma_url + '" target="_blank">Ouvrir dans Gamma</a>';
       } else if (data.status === 'error') {
         clearInterval(polls[jobId]);
