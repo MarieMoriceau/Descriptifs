@@ -126,7 +126,7 @@ function pollJob(jobId) {
       const badge = document.getElementById('badge-' + jobId);
       const logs = document.getElementById('logs-' + jobId);
       const linkDiv = document.getElementById('link-' + jobId);
-      logs.textContent = (data.logs || []).join('\n');
+      logs.textContent = (data.logs || []).join('\\n');
       logs.scrollTop = logs.scrollHeight;
       if (data.status === 'done') {
         clearInterval(polls[jobId]);
