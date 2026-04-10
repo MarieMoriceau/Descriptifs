@@ -499,28 +499,67 @@ def build_gamma_prompt(data, photo_urls, map_url):
 
 
 def call_gamma_api(title, prompt_text):
+    """
+    API Gamma v1.0 (GA novembre 2025)
+    Endpoint : POST https://public-api.gamma.app/v1.0/generations
+    Auth     : X-API-KEY header
+    Async    : poll GET /v1.0/generations/{generationId} jusqu'à status=completed
+    """
     headers = {
-        "Authorization": f"Bearer {GAMMA_API_KEY}",
+        "X-API-KEY": GAMMA_API_KEY,
         "Content-Type": "application/json",
     }
-    payload = {"title": title, "text": prompt_text, "theme": GAMMA_THEME_ID, "mode": "text_to_deck"}
+
+    payload = {
+        "inputText": prompt_text,
+        "textMode": "pasteAndTransform",  # contenu structuré fourni directement
+        "format": "presentation",
+        "cardDensity": "medium",
+        "numCards": 8,
+    }
+    if GAMMA_THEME_ID:
+        payload["themeId"] = GAMMA_THEME_ID
     if GAMMA_TEMPLATE_ID:
         payload["templateId"] = GAMMA_TEMPLATE_ID
 
-    resp = requests.post("https://api.gamma.app/v1/generate", headers=headers, json=payload, timeout=120)
+    # 1. Création de la génération
+    resp = requests.post(
+        "https://public-api.gamma.app/v1.0/generations",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
     if resp.status_code not in (200, 201):
         raise ValueError(f"Gamma API {resp.status_code}: {resp.text[:300]}")
 
-    result = resp.json()
-    gamma_url = (
-        result.get("url")
-        or result.get("deck", {}).get("url")
-        or result.get("presentation", {}).get("url")
-        or result.get("data", {}).get("url")
-    )
-    if not gamma_url:
-        raise ValueError(f"URL Gamma introuvable: {json.dumps(result)[:300]}")
-    return gamma_url
+    generation_id = resp.json().get("generationId")
+    if not generation_id:
+        raise ValueError(f"generationId absent: {resp.text[:300]}")
+
+    # 2. Polling jusqu'à completed (max 3 min)
+    for attempt in range(36):
+        time.sleep(5)
+        poll = requests.get(
+            f"https://public-api.gamma.app/v1.0/generations/{generation_id}",
+            headers=headers,
+            timeout=15,
+        )
+        if poll.status_code != 200:
+            raise ValueError(f"Polling erreur {poll.status_code}: {poll.text[:200]}")
+
+        data = poll.json()
+        status = data.get("status")
+
+        if status == "completed":
+            gamma_url = data.get("gammaUrl") or data.get("url")
+            if not gamma_url:
+                raise ValueError(f"gammaUrl absent dans la réponse: {json.dumps(data)[:300]}")
+            return gamma_url
+
+        if status == "failed":
+            raise ValueError(f"Génération Gamma échouée: {json.dumps(data)[:300]}")
+
+    raise ValueError("Timeout : génération Gamma non terminée après 3 minutes")
 
 
 if __name__ == "__main__":
