@@ -22,7 +22,7 @@ GOOGLE_MAPS_API_KEY = "AIzaSyAGE65fo1453M-5CGe162Klk8NjS9K0hJA"
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 GAMMA_THEME_ID      = "fo87qe3vn58hou1"
-GAMMA_TEMPLATE_ID   = "g_s502jxfcibkr6kq"
+GAMMA_TEMPLATE_ID   = ""
 
 UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
