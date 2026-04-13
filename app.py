@@ -20,7 +20,7 @@ jobs = {}
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
 GAMMA_THEME_ID      = "fo87qe3vn58hou1"
-GAMMA_TEMPLATE_ID = "MODELE-369-987aa8gnscle1l1"
+GAMMA_TEMPLATE_ID   = "g_s502jxfcibkr6kq"
 GOOGLE_MAPS_API_KEY = "AIzaSyAGE65fo1453M-5CGe162Klk8NjS9K0hJA"
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -549,15 +549,21 @@ INSTRUCTIONS FINALES :
 
 
 def create_gamma(prompt):
+    # ✅ FIX : payload strict — uniquement gammaId, prompt, themeId
+    # Ne jamais ajouter "templateId" : ce champ n'existe pas dans l'API Gamma v1.0
     headers = {"X-API-KEY": GAMMA_API_KEY, "Content-Type": "application/json"}
-    payload = {"gammaId": GAMMA_TEMPLATE_ID, "prompt": prompt, "themeId": GAMMA_THEME_ID}
+    payload = {
+        "gammaId": GAMMA_TEMPLATE_ID,
+        "prompt": prompt,
+        "themeId": GAMMA_THEME_ID
+    }
     r = requests.post("https://public-api.gamma.app/v1.0/generations/from-template",
                       headers=headers, json=payload, timeout=60)
     if r.status_code not in (200, 201):
-        raise Exception(f"Gamma API erreur {r.status_code}: {r.text[:200]}")
+        raise ValueError(f"Gamma API {r.status_code}: {r.text[:300]}")
     generation_id = r.json().get("generationId")
     if not generation_id:
-        raise Exception(f"Pas de generationId: {r.text}")
+        raise ValueError(f"Pas de generationId dans la reponse: {r.text}")
     for _ in range(60):
         time.sleep(5)
         poll = requests.get(f"https://public-api.gamma.app/v1.0/generations/{generation_id}",
@@ -567,8 +573,8 @@ def create_gamma(prompt):
             if result.get("status") == "completed":
                 return result.get("gammaUrl", "")
             elif result.get("status") == "failed":
-                raise Exception(f"Generation echouee: {result}")
-    raise Exception("Timeout apres 5 minutes.")
+                raise ValueError(f"Generation echouee: {result}")
+    raise ValueError("Timeout apres 5 minutes.")
 
 
 if __name__ == '__main__':
