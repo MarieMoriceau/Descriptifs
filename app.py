@@ -412,34 +412,80 @@ def extract_photos(pdf_path, min_kb=15):
     return paths
 
 
-# ============ CARTE OpenStreetMap + CERCLE 300 m (gratuit, sans clé) ============
+# ============ CARTE OpenStreetMap + CERCLE 300 m (100 % requests + PIL, sans dépendance) ============
+_TILE_UA = "equation-sie-descriptifs/1.0 (contact: mmoriceau@equation-sie.com)"
+
+def _deg2xy(lat, lon, z):
+    """Coordonnées de tuile (fractionnaires) Web Mercator."""
+    n = 2.0 ** z
+    x = (lon + 180.0) / 360.0 * n
+    lat_r = math.radians(lat)
+    y = (1.0 - math.asinh(math.tan(lat_r)) / math.pi) / 2.0 * n
+    return x, y
+
 def build_map_300(adresse, radius_m=300):
     """Carte OpenStreetMap centrée sur le bien + cercle de 300 m, uploadée sur imgbb.
-    Gratuit, sans clé Google ni facturation. Géocodage via Nominatim (OSM)."""
+    Aucune dépendance externe (staticmap/google) : on récupère les tuiles OSM avec
+    requests puis on les assemble avec PIL. Géocodage via Nominatim (OSM)."""
     if not adresse:
         return None
     q = re.sub(r"\s+", " ", adresse.replace("—", " ")).strip()
     if "france" not in q.lower():
         q += ", France"
     try:
+        # 1) Géocodage
         gr = requests.get("https://nominatim.openstreetmap.org/search",
                           params={"q": q, "format": "json", "limit": 1, "countrycodes": "fr"},
-                          headers={"User-Agent": "equation-sie-descriptifs/1.0"}, timeout=25).json()
+                          headers={"User-Agent": _TILE_UA}, timeout=25).json()
+        if not gr:
+            return None
         lat = float(gr[0]["lat"]); lon = float(gr[0]["lon"])
-        from staticmap import StaticMap
-        W, H, zoom = 1000, 700, 16
-        m = StaticMap(W, H, padding_x=0, padding_y=0,
-                      url_template="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                      headers={"User-Agent": "equation-sie-descriptifs/1.0"})
-        img = m.render(zoom=zoom, center=(lon, lat)).convert("RGBA")
-        base_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
+
+        # 2) Assemblage des tuiles OSM (256 px) autour du centre
+        W, H, z, TS = 1000, 700, 16, 256
+        cx_t, cy_t = _deg2xy(lat, lon, z)
+        # tuile de départ (coin haut-gauche) pour couvrir W x H centré
+        px_center = cx_t * TS
+        py_center = cy_t * TS
+        left = px_center - W / 2
+        top = py_center - H / 2
+        x0 = int(math.floor(left / TS))
+        y0 = int(math.floor(top / TS))
+        nx = int(math.ceil((left + W) / TS)) - x0
+        ny = int(math.ceil((top + H) / TS)) - y0
+
+        canvas = Image.new("RGBA", (nx * TS, ny * TS), (235, 235, 235, 255))
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": _TILE_UA})
+        n_max = 2 ** z
+        for ix in range(nx):
+            for iy in range(ny):
+                tx, ty = x0 + ix, y0 + iy
+                if tx < 0 or ty < 0 or tx >= n_max or ty >= n_max:
+                    continue
+                url = f"https://a.tile.openstreetmap.org/{z}/{tx}/{ty}.png"
+                try:
+                    tr = sess.get(url, timeout=20)
+                    if tr.status_code == 200:
+                        tile = Image.open(io.BytesIO(tr.content)).convert("RGBA")
+                        canvas.paste(tile, (ix * TS, iy * TS))
+                except Exception:
+                    continue
+
+        # 3) Recadrage exact W x H centré sur le bien
+        off_x = int(round(left - x0 * TS))
+        off_y = int(round(top - y0 * TS))
+        img = canvas.crop((off_x, off_y, off_x + W, off_y + H)).convert("RGBA")
+
+        # 4) Cercle 300 m + pin central
+        base_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** z)
         pr = radius_m / base_mpp
         cx, cy = W / 2, H / 2
-        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0)); d = ImageDraw.Draw(ov)
-        d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 60),
-                  outline=(214, 32, 54, 255), width=6)
-        d.ellipse([cx - 11, cy - 11, cx + 11, cy + 11], fill=(214, 32, 54, 255),
-                  outline=(255, 255, 255, 255), width=4)
+        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0)); dd = ImageDraw.Draw(ov)
+        dd.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 55),
+                   outline=(214, 32, 54, 255), width=6)
+        dd.ellipse([cx - 11, cy - 11, cx + 11, cy + 11], fill=(214, 32, 54, 255),
+                   outline=(255, 255, 255, 255), width=4)
         out = Image.alpha_composite(img, ov).convert("RGB")
         p = os.path.join(tempfile.mkdtemp(), "map.jpg"); out.save(p, "JPEG", quality=90)
         return upload_image(p)
