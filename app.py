@@ -284,7 +284,7 @@ def run_job(job_id, pdf_path, filename):
             u = upload_image(path)
             if u: image_urls.append(u)
         map_url = build_map_300(info.get('adresse', ''))
-        update(4, "Carte 300 m OK" if map_url else "Carte non generee (verifier que 'Maps Static API' est activee)")
+        update(4, "Carte 300 m OK" if map_url else "Carte non generee")
         update(5, 'Construction du descriptif...')
         prompt = build_prompt(info, image_urls, map_url)
         update(6, 'Generation Gamma (~2 min)...')
@@ -412,35 +412,34 @@ def extract_photos(pdf_path, min_kb=15):
     return paths
 
 
-# ============ CARTE GOOGLE + CERCLE 300 m ============
+# ============ CARTE OpenStreetMap + CERCLE 300 m (gratuit, sans clé) ============
 def build_map_300(adresse, radius_m=300):
-    """Carte Google Maps centrée sur le bien + cercle de 300 m, uploadée sur imgbb.
-    N'utilise PAS l'API Geocoding (souvent non activée) : on passe l'adresse en 'center',
-    Google la géolocalise pour l'image, et on trace le cercle avec la latitude de Paris."""
+    """Carte OpenStreetMap centrée sur le bien + cercle de 300 m, uploadée sur imgbb.
+    Gratuit, sans clé Google ni facturation. Géocodage via Nominatim (OSM)."""
     if not adresse:
         return None
     q = re.sub(r"\s+", " ", adresse.replace("—", " ")).strip()
-    if "paris" not in q.lower():
-        q += ", Paris"
-    q += ", France"
+    if "france" not in q.lower():
+        q += ", France"
     try:
-        zoom, sw, sh, scale = 16, 640, 470, 2
-        r = requests.get("https://maps.googleapis.com/maps/api/staticmap", params={
-            "center": q, "zoom": zoom, "size": f"{sw}x{sh}", "scale": scale,
-            "maptype": "roadmap", "markers": f"color:0xD62036|{q}",
-            "key": GOOGLE_MAPS_API_KEY}, timeout=25)
-        if r.status_code != 200 or not r.content:
-            return None
-        img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-        W, H = img.size
-        lat = 48.86  # Paris — l'écart de rayon sur la ville est négligeable
+        gr = requests.get("https://nominatim.openstreetmap.org/search",
+                          params={"q": q, "format": "json", "limit": 1, "countrycodes": "fr"},
+                          headers={"User-Agent": "equation-sie-descriptifs/1.0"}, timeout=25).json()
+        lat = float(gr[0]["lat"]); lon = float(gr[0]["lon"])
+        from staticmap import StaticMap
+        W, H, zoom = 1000, 700, 16
+        m = StaticMap(W, H, padding_x=0, padding_y=0,
+                      url_template="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                      headers={"User-Agent": "equation-sie-descriptifs/1.0"})
+        img = m.render(zoom=zoom, center=(lon, lat)).convert("RGBA")
         base_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
-        mpp = base_mpp / scale
-        pr = radius_m / mpp
+        pr = radius_m / base_mpp
         cx, cy = W / 2, H / 2
         ov = Image.new("RGBA", (W, H), (0, 0, 0, 0)); d = ImageDraw.Draw(ov)
-        d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 55),
+        d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 60),
                   outline=(214, 32, 54, 255), width=6)
+        d.ellipse([cx - 11, cy - 11, cx + 11, cy + 11], fill=(214, 32, 54, 255),
+                  outline=(255, 255, 255, 255), width=4)
         out = Image.alpha_composite(img, ov).convert("RGB")
         p = os.path.join(tempfile.mkdtemp(), "map.jpg"); out.save(p, "JPEG", quality=90)
         return upload_image(p)
