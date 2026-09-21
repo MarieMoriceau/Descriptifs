@@ -284,6 +284,7 @@ def run_job(job_id, pdf_path, filename):
             u = upload_image(path)
             if u: image_urls.append(u)
         map_url = build_map_300(info.get('adresse', ''))
+        update(4, "Carte 300 m OK" if map_url else "Carte non generee (verifier que 'Maps Static API' est activee)")
         update(5, 'Construction du descriptif...')
         prompt = build_prompt(info, image_urls, map_url)
         update(6, 'Generation Gamma (~2 min)...')
@@ -413,31 +414,32 @@ def extract_photos(pdf_path, min_kb=15):
 
 # ============ CARTE GOOGLE + CERCLE 300 m ============
 def build_map_300(adresse, radius_m=300):
-    """Carte Google Maps centrée sur le bien avec un cercle de 300 m, uploadée sur imgbb."""
+    """Carte Google Maps centrée sur le bien + cercle de 300 m, uploadée sur imgbb.
+    N'utilise PAS l'API Geocoding (souvent non activée) : on passe l'adresse en 'center',
+    Google la géolocalise pour l'image, et on trace le cercle avec la latitude de Paris."""
     if not adresse:
         return None
-    q = re.sub(r"\s+", " ", adresse.replace("—", " ")).strip() + ", France"
+    q = re.sub(r"\s+", " ", adresse.replace("—", " ")).strip()
+    if "paris" not in q.lower():
+        q += ", Paris"
+    q += ", France"
     try:
-        # 1) géocodage Google -> lat/lng (pour tracer un cercle métrique exact)
-        g = requests.get("https://maps.googleapis.com/maps/api/geocode/json",
-                         params={"address": q, "key": GOOGLE_MAPS_API_KEY}, timeout=20).json()
-        loc = g["results"][0]["geometry"]["location"]; lat, lng = loc["lat"], loc["lng"]
-        # 2) fond de carte Google statique (scale 2 = net)
         zoom, sw, sh, scale = 16, 640, 470, 2
         r = requests.get("https://maps.googleapis.com/maps/api/staticmap", params={
-            "center": f"{lat},{lng}", "zoom": zoom, "size": f"{sw}x{sh}", "scale": scale,
-            "maptype": "roadmap", "markers": f"color:0xD62036|{lat},{lng}",
+            "center": q, "zoom": zoom, "size": f"{sw}x{sh}", "scale": scale,
+            "maptype": "roadmap", "markers": f"color:0xD62036|{q}",
             "key": GOOGLE_MAPS_API_KEY}, timeout=25)
-        if r.status_code != 200:
+        if r.status_code != 200 or not r.content:
             return None
         img = Image.open(io.BytesIO(r.content)).convert("RGBA")
         W, H = img.size
-        base_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)  # m/pixel (logique)
-        mpp = base_mpp / scale                                               # m/pixel (image scale 2)
+        lat = 48.86  # Paris — l'écart de rayon sur la ville est négligeable
+        base_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
+        mpp = base_mpp / scale
         pr = radius_m / mpp
         cx, cy = W / 2, H / 2
         ov = Image.new("RGBA", (W, H), (0, 0, 0, 0)); d = ImageDraw.Draw(ov)
-        d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 60),
+        d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 55),
                   outline=(214, 32, 54, 255), width=6)
         out = Image.alpha_composite(img, ov).convert("RGB")
         p = os.path.join(tempfile.mkdtemp(), "map.jpg"); out.save(p, "JPEG", quality=90)
