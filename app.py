@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-Equation SIE — PDF -> Gamma
-- Titre automatique [RENDER - A RETRAVAILLER]
-- Multi-PDF simultanes avec suivi par fichier
-- Skip page 1 (logo confrere)
-- Surfaces par etage
-- Extraction photos pypdf uniquement (pas de rasterisation = pas de crash memoire)
+Equation SIE — PDF -> Gamma (descriptif FINI, sur le modèle MODELE 369)
+Version intégrée : extraction Claude + photos (dédoublonnées) + carte Google 300 m
++ prompt validé (bandeau violet conservé, contacts Équation, étages haut->bas, sans doublon).
+Remplace l'ancien app.py. Même structure Flask / jobs / imgbb / from-template.
 """
-import os, json, re, base64, tempfile, time, io, threading
+import os, json, re, base64, tempfile, time, io, math, hashlib, threading
 import requests
 import pdfplumber
 from pypdf import PdfReader
-from PIL import Image
+from PIL import Image, ImageDraw
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
@@ -23,6 +21,14 @@ GAMMA_THEME_ID      = "fo87qe3vn58hou1"
 GAMMA_TEMPLATE_ID   = "g_s502jxfcibkr6kq"
 GOOGLE_MAPS_API_KEY = "AIzaSyAGE65fo1453M-5CGe162Klk8NjS9K0hJA"
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL        = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+# Équipe Équation — remplace systématiquement les contacts du confrère
+EQUIPE = [
+    {"name": "Lionel Bastian", "email": "lbastian@equation-sie.com", "phone": "07 82 83 67 43"},
+    {"name": "Marine Bureau de Rotalier", "email": "mbureau@equation-sie.com", "phone": "06 18 98 23 31"},
+    {"name": "Richard Abou Khalil", "email": "rabou-khalil@equation-sie.com", "phone": "06 27 86 54 71"},
+]
 
 HTML = """<!DOCTYPE html>
 <html lang="fr">
@@ -268,23 +274,18 @@ def run_job(job_id, pdf_path, filename):
         text = extract_text_from_pdf(pdf_path)
         update(2, 'Analyse Claude...')
         info = parse_info_with_claude(text)
-        update(2, f"Adresse : {info.get('adresse','?')} {info.get('code_postal','')}")
+        update(2, f"Adresse : {info.get('adresse','?')}")
         update(3, 'Extraction photos...')
-        plan_paths, plan_page_idxs = detect_plans_par_texte(pdf_path)
-        photos = extract_photos(pdf_path, plan_page_idxs=plan_page_idxs)
-        update(3, f"{len(photos)} photos extraites")
-        update(4, 'Upload photos...')
+        photos = extract_photos(pdf_path)          # dédoublonnées + filtre document
+        update(3, f"{len(photos)} photo(s)")
+        update(4, 'Upload photos + carte 300 m...')
         image_urls = []
-        for path in photos[:12]:
-            url = upload_image(path)
-            if url: image_urls.append(url)
-        plan_urls = []
-        for pp in plan_paths:
-            url = upload_image(pp)
-            if url: plan_urls.append(url)
-        maps_url = upload_maps_image(info.get('adresse', ''), info.get('code_postal', ''))
-        update(5, 'Construction prompt...')
-        prompt = build_prompt(info, image_urls, plan_urls=plan_urls, maps_url=maps_url)
+        for path in photos[:6]:
+            u = upload_image(path)
+            if u: image_urls.append(u)
+        map_url = build_map_300(info.get('adresse', ''))
+        update(5, 'Construction du descriptif...')
+        prompt = build_prompt(info, image_urls, map_url)
         update(6, 'Generation Gamma (~2 min)...')
         gamma_url = create_gamma(prompt)
         jobs[job_id]['status'] = 'done'
@@ -308,161 +309,141 @@ def extract_text_from_pdf(pdf_path):
     return "\n\n".join(parts)
 
 
+# ============ EXTRACTION CLAUDE (schéma descriptif Équation) ============
+EXTRACT_SCHEMA = """Renvoie UNIQUEMENT un JSON valide (aucun texte autour) :
+{
+ "adresse": "N° rue — CODE Ville",
+ "transaction": "location" | "vente",
+ "surface_full": "…",
+ "dispo": "…",
+ "immeuble": ["…", ...],
+ "locaux": ["…", ...],
+ "recurrents": ["Label : valeur", ...],
+ "entree": ["Label : valeur", ...],
+ "juridiques": ["Label : valeur", ...],
+ "surfaces": [["Niveau","Type","Surface"], ...],
+ "desserte": ["…", ...],
+ "card_titles": null
+}
+Règles STRICTES :
+- français, chiffres AU MOT PRÈS depuis le document, n'invente rien (mets "" ou omets si absent).
+- "adresse" ex : "60 Rue Jouffroy d'Abbans — 75017 Paris".
+- "surfaces" : classe DU PLUS HAUT ÉTAGE AU PLUS BAS, et termine par ["","TOTAL","… m²"].
+- "recurrents" : loyer, charges, taxe bureaux, impôt foncier, TEOM (selon dispo).
+- "entree" : dépôt de garantie, honoraires, frais d'acte.
+- "juridiques" : bail, régime fiscal, indexation, paiement.
+- pour une VENTE : "card_titles" = ["Prix & charges","Acquisition","Le bien"] et mets le prix dans "recurrents".
+- NE reprends PAS les coordonnées de l'agent du confrère (remplacées par l'équipe Équation)."""
+
 def parse_info_with_claude(text):
-    prompt = f"""Tu es un expert en immobilier de bureaux parisien.
-Analyse ce descriptif et extrais les informations au format JSON strict. Si absent, mets null.
-Code postal toujours format 750XX.
-
-IMPORTANT surfaces : si plusieurs lots ou etages, liste chaque lot separement.
-Exemple : "surfaces_detail": ["301 m2 (6eme etage) - 750 euros/m2/an", "426 m2 (3eme etage) - 850 euros/m2/an"]
-
-{{"adresse":"55 RUE D AMSTERDAM","code_postal":"75008",
-"surfaces":["1576 m2"],"surfaces_detail":["1576 m2 (2eme etage) - 850 euros/m2/an"],
-"loyers":["850 euros/m2/an HT HC"],"disponibilite":"Juin 2026",
-"divisibilite":"Divisible a partir de 484 m2","transports":["Gare Saint-Lazare - 1 min"],
-"prestations":["Climatisation","Fibre optique"],"description":"Description courte",
-"confrere":"JLL","charges":"80 euros/m2/an HT","impot_foncier":"25 euros/m2/an HT",
-"taxe_bureaux":"21 euros/m2/an HT","teom":null,"bail":"3/6/9 ans",
-"depot_garantie":"3 mois de loyer HT","regime_fiscal":"TVA"}}
-
-Texte :
----
-{text[:8000]}
----
-Reponds UNIQUEMENT avec le JSON."""
-    try:
-        r = requests.post("https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 1200,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=30)
-        if r.status_code == 200:
-            raw = r.json()["content"][0]["text"].strip()
-            if "```" in raw:
-                raw = raw.split("```")[1]
-                if raw.startswith("json"): raw = raw[4:]
-            data = json.loads(raw)
-            def s(v, default=""):
-                if v is None: return default
-                return str(v).strip() or default
-            def norm_surfaces(lst):
-                result = []
-                for x in (lst or []):
-                    sx = str(x).strip()
-                    if not sx: continue
-                    try:
-                        val = float(sx.replace(" ","").replace(",",".").replace("m2","").replace("m²",""))
-                        result.append(f"{int(val)} m²")
-                    except:
-                        result.append(sx if "m" in sx else sx + " m²")
-                return result
-            def norm_loyers(lst):
-                result = []
-                for x in (lst or []):
-                    sx = str(x).strip()
-                    if not sx: continue
-                    try:
-                        val = float(sx.replace(" ","").replace(",",".").replace("euros","")
-                                      .replace("€","").replace("/m2/an","").replace("/m²/an","")
-                                      .replace("HTHC","").strip())
-                        result.append(f"{int(val)} euros/m2/an HT HC")
-                    except:
-                        result.append(sx)
-                return result
-            return {
-                "adresse": s(data.get("adresse")).upper(),
-                "code_postal": s(data.get("code_postal")),
-                "surfaces": norm_surfaces(data.get("surfaces")),
-                "surfaces_detail": [s(x) for x in (data.get("surfaces_detail") or []) if x],
-                "loyers": norm_loyers(data.get("loyers")),
-                "disponibilite": s(data.get("disponibilite")),
-                "divisibilite": s(data.get("divisibilite")),
-                "transports": [s(x) for x in (data.get("transports") or []) if x],
-                "prestations": [s(x) for x in (data.get("prestations") or []) if x],
-                "description": s(data.get("description")),
-                "confrere": s(data.get("confrere")),
-                "charges": s(data.get("charges"), "Nous consulter"),
-                "impot_foncier": s(data.get("impot_foncier"), "En cours de determination"),
-                "taxe_bureaux": s(data.get("taxe_bureaux"), "En cours de determination"),
-                "teom": s(data.get("teom"), "En cours de determination"),
-                "bail": s(data.get("bail"), "3/6/9 ans"),
-                "depot_garantie": s(data.get("depot_garantie"), "3 mois de loyer HT HC"),
-                "regime_fiscal": s(data.get("regime_fiscal"), "TVA"),
-            }
-    except Exception:
-        pass
-    return {
-        "adresse": "", "code_postal": "", "surfaces": [], "surfaces_detail": [],
-        "loyers": [], "disponibilite": "", "divisibilite": "", "transports": [],
-        "prestations": [], "description": "", "confrere": "",
-        "charges": "Nous consulter", "impot_foncier": "En cours de determination",
-        "taxe_bureaux": "En cours de determination", "teom": "En cours de determination",
-        "bail": "3/6/9 ans", "depot_garantie": "3 mois de loyer HT HC", "regime_fiscal": "TVA",
-    }
+    prompt = (f"Voici le texte brut d'un descriptif immobilier de bureaux (confrère).\n\n{EXTRACT_SCHEMA}\n\n"
+              f"=== TEXTE ===\n{text[:16000]}")
+    r = requests.post("https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": CLAUDE_MODEL, "max_tokens": 2000,
+              "messages": [{"role": "user", "content": prompt}]}, timeout=90)
+    if r.status_code != 200:
+        raise ValueError(f"Claude API {r.status_code}: {r.text[:200]}")
+    raw = r.json()["content"][0]["text"]
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        raise ValueError("Claude n'a pas renvoyé de JSON")
+    d = json.loads(m.group(0))
+    d.setdefault("transaction", "location")
+    for k in ["immeuble", "locaux", "recurrents", "entree", "juridiques", "surfaces", "desserte"]:
+        d.setdefault(k, [])
+    return d
 
 
-def detect_plans_par_texte(pdf_path, min_kb=30):
-    """Detecte les pages de plans — skip page 0 (logo confrere)."""
+# ============ PHOTOS (pypdf, dédoublonnées, filtre "page-document") ============
+def _palette(pil):
+    im = pil.convert("RGB").resize((64, 64))
+    px = list(im.getdata()); n = len(px)
+    from collections import Counter
+    q = [(r // 32, g // 32, b // 32) for r, g, b in px]; c = Counter(q)
+    white = sum(1 for r, g, b in px if r > 225 and g > 225 and b > 225) / n
+    return len(c), white
+
+
+def extract_photos(pdf_path, min_kb=15):
+    """Photos réelles uniquement : skip page 1 (logo confrère), dédoublonnage,
+    on écarte les images 'document' (fond très blanc) et les logos/plans (palette pauvre)."""
     reader = PdfReader(pdf_path)
     temp_dir = tempfile.mkdtemp()
-    plan_paths = []
-    plan_page_idxs = set()
-    with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
-            if i == 0: continue  # skip page 1 logo confrere
-            t = (page.extract_text() or "").strip()
-            lignes = [l.strip() for l in t.split("\n") if l.strip()]
-            titre = " ".join(lignes[:8]).lower()
-            if not re.search(r"\bplan\b", titre): continue
-            has_image = any(len(img.data) / 1024 >= min_kb for img in reader.pages[i].images)
-            if not has_image: continue
-            plan_page_idxs.add(i)
-            meilleures = []
-            for img in reader.pages[i].images:
-                if len(img.data) / 1024 < min_kb: continue
-                try:
-                    pil = Image.open(io.BytesIO(img.data))
-                    meilleures.append((pil.width * pil.height, img.data))
-                except Exception: pass
-            if meilleures:
-                meilleures.sort(key=lambda x: x[0], reverse=True)
-                _, data = meilleures[0]
-                path = os.path.join(temp_dir, f"plan_p{i+1}.jpg")
-                try:
-                    Image.open(io.BytesIO(data)).convert("RGB").save(path, "JPEG", quality=88)
-                except Exception:
-                    with open(path, "wb") as f: f.write(data)
-                plan_paths.append(path)
-    return plan_paths, plan_page_idxs
-
-
-def extract_photos(pdf_path, plan_page_idxs=None, min_kb=15):
-    """
-    Extraction photos via pypdf uniquement — pas de rasterisation PDF
-    pour eviter les crashes memoire sur Render plan gratuit (512 Mo).
-    Skip page 0 (logo confrere page 1).
-    """
-    reader = PdfReader(pdf_path)
-    temp_dir = tempfile.mkdtemp()
-    paths = []
-    skip = set(plan_page_idxs or set())
-    skip.add(0)  # toujours ignorer la page 1
-
+    cands = []
+    seen = set()
     for pn, page in enumerate(reader.pages):
-        if pn in skip: continue
+        if pn == 0:  # page 1 = logo/couverture confrère
+            continue
         for idx, img in enumerate(page.images):
-            if len(img.data) / 1024 < min_kb: continue
+            data = img.data
+            if len(data) / 1024 < min_kb:
+                continue
+            h = hashlib.md5(data).hexdigest()
+            if h in seen:      # dédoublonnage strict
+                continue
+            seen.add(h)
             try:
-                pil = Image.open(io.BytesIO(img.data))
-                w, h = pil.size
-                if w < 200 or h < 150: continue
-                path = os.path.join(temp_dir, f"photo_p{pn+1}_{idx}.jpg")
-                pil.convert("RGB").save(path, "JPEG", quality=85)
-                paths.append(path)
-            except Exception: pass
+                pil = Image.open(io.BytesIO(data)); w, ht = pil.size
+            except Exception:
+                continue
+            if w < 500 or ht < 350:
+                continue
+            ar = w / ht
+            if not (0.85 <= ar <= 2.3):    # bandeaux/logos allongés
+                continue
+            dist, white = _palette(pil)
+            if dist < 30 or white >= 0.60:  # palette pauvre = plan/logo ; très blanc = page texte
+                continue
+            cands.append({"data": data, "dist": dist, "size": len(data)})
+    cands.sort(key=lambda x: x["dist"], reverse=True)   # les plus "photographiques" d'abord
+    paths = []
+    for i, c in enumerate(cands[:6]):
+        try:
+            p = os.path.join(temp_dir, f"photo_{i}.jpg")
+            im = Image.open(io.BytesIO(c["data"])).convert("RGB")
+            if im.width > 1400:
+                im = im.resize((1400, int(im.height * 1400 / im.width)))
+            im.save(p, "JPEG", quality=85); paths.append(p)
+        except Exception:
+            pass
+    return paths
 
-    return paths[:12]
+
+# ============ CARTE GOOGLE + CERCLE 300 m ============
+def build_map_300(adresse, radius_m=300):
+    """Carte Google Maps centrée sur le bien avec un cercle de 300 m, uploadée sur imgbb."""
+    if not adresse:
+        return None
+    q = re.sub(r"\s+", " ", adresse.replace("—", " ")).strip() + ", France"
+    try:
+        # 1) géocodage Google -> lat/lng (pour tracer un cercle métrique exact)
+        g = requests.get("https://maps.googleapis.com/maps/api/geocode/json",
+                         params={"address": q, "key": GOOGLE_MAPS_API_KEY}, timeout=20).json()
+        loc = g["results"][0]["geometry"]["location"]; lat, lng = loc["lat"], loc["lng"]
+        # 2) fond de carte Google statique (scale 2 = net)
+        zoom, sw, sh, scale = 16, 640, 470, 2
+        r = requests.get("https://maps.googleapis.com/maps/api/staticmap", params={
+            "center": f"{lat},{lng}", "zoom": zoom, "size": f"{sw}x{sh}", "scale": scale,
+            "maptype": "roadmap", "markers": f"color:0xD62036|{lat},{lng}",
+            "key": GOOGLE_MAPS_API_KEY}, timeout=25)
+        if r.status_code != 200:
+            return None
+        img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+        W, H = img.size
+        base_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)  # m/pixel (logique)
+        mpp = base_mpp / scale                                               # m/pixel (image scale 2)
+        pr = radius_m / mpp
+        cx, cy = W / 2, H / 2
+        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0)); d = ImageDraw.Draw(ov)
+        d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 60),
+                  outline=(214, 32, 54, 255), width=6)
+        out = Image.alpha_composite(img, ov).convert("RGB")
+        p = os.path.join(tempfile.mkdtemp(), "map.jpg"); out.save(p, "JPEG", quality=90)
+        return upload_image(p)
+    except Exception:
+        return None
 
 
 def upload_image(path):
@@ -473,108 +454,62 @@ def upload_image(path):
     return r.json()["data"]["url"] if r.status_code == 200 else None
 
 
-def upload_maps_image(adresse, code_postal):
-    if not adresse: return None
-    adresse_complete = f"{adresse}, {code_postal} Paris, France"
-    params = {"center": adresse_complete, "zoom": "16", "size": "800x600",
-              "maptype": "roadmap", "markers": f"color:red|{adresse_complete}",
-              "key": GOOGLE_MAPS_API_KEY}
-    query = "&".join(f"{k}={requests.utils.quote(str(v))}" for k, v in params.items())
-    try:
-        r = requests.get(f"https://maps.googleapis.com/maps/api/staticmap?{query}", timeout=20)
-        if r.status_code != 200: return None
-        encoded = base64.b64encode(r.content).decode("utf-8")
-        r2 = requests.post("https://api.imgbb.com/1/upload",
-                           data={"key": IMGBB_API_KEY, "image": encoded}, timeout=30)
-        return r2.json()["data"]["url"] if r2.status_code == 200 else None
-    except Exception: return None
+# ============ PROMPT (from-template validé) ============
+def build_prompt(d, photo_urls, map_url):
+    vente = d.get("transaction") == "vente"
+    def lst(x): return " ; ".join([str(i) for i in (x or [])])
+    titles = d.get("card_titles") or ["Coûts récurrents", "Coûts à l'entrée", "Données juridiques"]
+    surf = "\n".join(f"- {row[0]}/{row[1]}/{row[2]}" for row in d.get("surfaces", []) if len(row) == 3)
+    dess = "\n".join(f"- {x}" for x in d.get("desserte", []))
+    gal = "\n".join(f"![]({u})" for u in photo_urls)
+    eq = " ; ".join(f"{c['name']} {c['email']} {c['phone']}" for c in EQUIPE)
+    mp = f"\nCarte de situation (rayon 300 m) : ![]({map_url})" if map_url else ""
+    dispo = f" — Disponibilité : {d['dispo']}" if d.get("dispo") else ""
+    return f"""Conserve EXACTEMENT la structure, l'ordre des cartes et la mise en page de ce modèle. Remplace le contenu par ce bien, en français, chiffres au mot près, et INSÈRE les images fournies aux emplacements images du modèle (galeries, carte d'accès). N'ajoute aucune page. SUR LA COUVERTURE : CONSERVE le bandeau violet du modèle tel quel — ne le remplace JAMAIS par une photo, garde juste le titre/adresse et le logo du modèle. PHOTOS : n'utilise CHAQUE photo qu'UNE SEULE FOIS — AUCUN DOUBLON. Si le modèle a plus d'emplacements photos que de photos fournies, SUPPRIME les cartes photos en trop plutôt que de dupliquer. AGRANDIS la carte de situation sur la carte « Accès » : grande, pleine largeur. NE mets AUCUN titre du type « à retravailler ».
 
+COUVERTURE (garde le bandeau violet) : {d.get('adresse','')} — Bureaux à {'vendre' if vente else 'louer'} — {d.get('surface_full','')}{dispo}
 
-def build_prompt(info, image_urls, plan_urls=None, maps_url=None):
-    adresse  = info.get("adresse") or "Adresse a preciser"
-    cp       = info.get("code_postal", "")
-    surfaces_detail = info.get("surfaces_detail", [])
-    surfaces_simple = " / ".join(info.get("surfaces", [])) or "A preciser"
-    if surfaces_detail:
-        surfaces_bloc = "\n".join(f"  - {s}" for s in surfaces_detail)
-        surfaces_txt = f"DETAIL DES SURFACES :\n{surfaces_bloc}\n  Total : {surfaces_simple}"
-    else:
-        surfaces_txt = f"SURFACE : {surfaces_simple}"
-    loyers   = " | ".join(info.get("loyers", [])) or "Nous consulter"
-    dispo    = info.get("disponibilite") or "A preciser"
-    div      = info.get("divisibilite", "")
-    desc     = info.get("description") or "Bureau de qualite dans un immeuble moderne."
-    trans    = "\n".join(f"- {t}" for t in info.get("transports", [])) or "- A completer"
-    prest    = "\n".join(f"- {p}" for p in info.get("prestations", [])) or "- A completer"
-    photos   = ("PHOTOS :\n" + "\n".join(f"- {u}" for u in image_urls[:12])) if image_urls else ""
-    plans    = ("PLANS :\n" + "\n".join(f"- {u}" for u in plan_urls)) if plan_urls else ""
-    maps_s   = f"CARTE 300m :\n- {maps_url}" if maps_url else ""
-    titre    = f"[RENDER - A RETRAVAILLER] {adresse} — {cp} PARIS — {surfaces_simple}"
+À RETENIR SUR L'IMMEUBLE : {lst(d.get('immeuble'))}
+À RETENIR SUR LES LOCAUX : {lst(d.get('locaux'))}
 
-    return f"""Utilise la structure exacte de ce template pour creer un nouveau descriptif immobilier.
-REGLES ABSOLUES A RESPECTER :
-- Conserver EXACTEMENT la mise en page du template sans aucune modification
-- Conserver le logo Equation SIE A SA TAILLE ORIGINALE dans le template, ne pas l'agrandir
-- La page de couverture doit garder le logo petit, en haut a droite uniquement
-- Conserver la derniere page de contact sans modification
-- Ne jamais dupliquer ou redimensionner le logo
-ADRESSE : {adresse}
-LOCALISATION : {adresse}, {cp} PARIS
-{surfaces_txt}
-DISPONIBILITE : {dispo}
-{f"DIVISIBILITE : {div}" if div else ""}
-DESCRIPTION : {desc}
-TRANSPORTS :
-{trans}
-PRESTATIONS :
-{prest}
-PAGE 4 COUTS RECURRENTS :
-Loyer bureaux : {loyers}
-Charges bureaux : {info.get('charges', 'Nous consulter')}
-Impot foncier : {info.get('impot_foncier', 'En cours de determination')}
-Taxe bureaux : {info.get('taxe_bureaux', 'En cours de determination')}
-PAGE 4 DONNEES JURIDIQUES :
-Bail : {info.get('bail', '3/6/9 ans')}
-Regime fiscal : {info.get('regime_fiscal', 'TVA')}
-Depot de garantie : {info.get('depot_garantie', '3 mois de loyer HT HC')}
-{photos}
-{plans}
-{maps_s}
-TITRE : {titre}
-INSTRUCTIONS FINALES :
-- Code postal toujours {cp}, jamais "Paris Xe"
-- Ne pas inclure logos des confreres (Knight Frank, CBRE, JLL, BNP, Cushman)
-- Le titre doit commencer par [RENDER - A RETRAVAILLER]
-- Logo Equation SIE : conserver uniquement celui du template, a sa taille originale, ne pas l'agrandir ni le dupliquer"""
+GALERIE (photos réelles du bien) :
+{gal}
+
+{titles[0].upper()} : {lst(d.get('recurrents'))}
+{titles[1].upper()} : {lst(d.get('entree'))}
+{titles[2].upper()} : {lst(d.get('juridiques'))}
+
+TABLEAU DE SURFACES (Niveau/Type/Surface, du plus haut au plus bas) :
+{surf}
+
+ACCÈS & DESSERTE :
+{dess}{mp}
+
+CONTACTS (équipe Équation, remplacent ceux du confrère) : {eq}
+"""
 
 
 def create_gamma(prompt):
-    # ✅ FIX : payload strict — uniquement gammaId, prompt, themeId
-    # Ne jamais ajouter "templateId" : ce champ n'existe pas dans l'API Gamma v1.0
     headers = {"X-API-KEY": GAMMA_API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "gammaId": GAMMA_TEMPLATE_ID,
-        "prompt": prompt,
-        "themeId": GAMMA_THEME_ID
-    }
+    payload = {"gammaId": GAMMA_TEMPLATE_ID, "prompt": prompt, "themeId": GAMMA_THEME_ID}
     r = requests.post("https://public-api.gamma.app/v1.0/generations/from-template",
                       headers=headers, json=payload, timeout=60)
     if r.status_code not in (200, 201):
         raise ValueError(f"Gamma API {r.status_code}: {r.text[:300]}")
-    generation_id = r.json().get("generationId")
-    if not generation_id:
-        raise ValueError(f"Pas de generationId dans la reponse: {r.text}")
-    for _ in range(60):
+    gid = r.json().get("generationId")
+    if not gid:
+        raise ValueError(f"Pas de generationId : {r.text}")
+    for _ in range(70):
         time.sleep(5)
-        poll = requests.get(f"https://public-api.gamma.app/v1.0/generations/{generation_id}",
+        poll = requests.get(f"https://public-api.gamma.app/v1.0/generations/{gid}",
                             headers={"X-API-KEY": GAMMA_API_KEY}, timeout=20)
         if poll.status_code == 200:
-            result = poll.json()
-            if result.get("status") == "completed":
-                return result.get("gammaUrl", "")
-            elif result.get("status") == "failed":
-                raise ValueError(f"Generation echouee: {result}")
-    raise ValueError("Timeout apres 5 minutes.")
+            res = poll.json()
+            if res.get("status") == "completed":
+                return res.get("gammaUrl", "")
+            if res.get("status") in ("failed", "error"):
+                raise ValueError(f"Generation echouee: {res}")
+    raise ValueError("Timeout Gamma.")
 
 
 if __name__ == '__main__':
