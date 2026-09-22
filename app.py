@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
-VERSION = "2026-09-22-allphotos+plans+map"
+VERSION = "2026-09-22-nolimit-photos+plans+map"
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
@@ -400,7 +400,7 @@ def _save(data, path):
     return path
 
 
-def extract_media(pdf_path, max_photos=12, max_plans=4):
+def extract_media(pdf_path, max_photos=None, max_plans=None):
     """Sépare PHOTOS et PLANS.
     Priorité au titre de section de la page (« Photos », « Plans ») quand le confrère
     en met un (cas JLL/BNP/CBRE) ; sinon on retombe sur l'analyse de palette.
@@ -461,18 +461,20 @@ def extract_media(pdf_path, max_photos=12, max_plans=4):
     # photos : les plus « photographiques »/grandes d'abord, on les prend TOUTES (plafond de sécurité)
     photos.sort(key=lambda x: x["dist"] + x["px"] / 200000.0, reverse=True)
     plans.sort(key=lambda x: x["px"], reverse=True)
+    photos_sel = photos if max_photos is None else photos[:max_photos]
+    plans_sel = plans if max_plans is None else plans[:max_plans]
     photo_paths, plan_paths = [], []
-    for i, c in enumerate(photos[:max_photos]):
+    for i, c in enumerate(photos_sel):
         try: photo_paths.append(_save(c["data"], os.path.join(temp_dir, f"photo_{i}.jpg")))
         except Exception: pass
-    for i, c in enumerate(plans[:max_plans]):
+    for i, c in enumerate(plans_sel):
         try: plan_paths.append(_save(c["data"], os.path.join(temp_dir, f"plan_{i}.jpg")))
         except Exception: pass
     return {"photos": photo_paths, "plans": plan_paths}
 
 
-def extract_photos(pdf_path, max_photos=12):
-    """Compat : renvoie uniquement les chemins photos."""
+def extract_photos(pdf_path, max_photos=None):
+    """Compat : renvoie uniquement les chemins photos (toutes par défaut)."""
     return extract_media(pdf_path, max_photos=max_photos)["photos"]
 
 
