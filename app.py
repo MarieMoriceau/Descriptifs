@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
-VERSION = "2026-09-22-adaptive-photos+map"
+VERSION = "2026-09-22-allphotos+plans+map"
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
@@ -283,18 +283,23 @@ def run_job(job_id, pdf_path, filename):
         update(2, 'Analyse Claude...')
         info = parse_info_with_claude(text)
         update(2, f"Adresse : {info.get('adresse','?')}")
-        update(3, 'Extraction photos...')
-        photos = extract_photos(pdf_path)          # dédoublonnées + filtre document
-        update(3, f"{len(photos)} photo(s)")
-        update(4, 'Upload photos + carte 300 m...')
+        update(3, 'Extraction photos + plans...')
+        media = extract_media(pdf_path)            # photos ET plans, dédoublonnés
+        photos, plans = media["photos"], media["plans"]
+        update(3, f"{len(photos)} photo(s), {len(plans)} plan(s)")
+        update(4, 'Upload photos + plans + carte 300 m...')
         image_urls = []
-        for path in photos[:6]:
+        for path in photos:
             u = upload_image(path)
             if u: image_urls.append(u)
+        plan_urls = []
+        for path in plans:
+            u = upload_image(path)
+            if u: plan_urls.append(u)
         map_url = build_map_300(info.get('adresse', ''))
         update(4, "Carte 300 m OK" if map_url else "Carte non generee")
         update(5, 'Construction du descriptif...')
-        prompt = build_prompt(info, image_urls, map_url)
+        prompt = build_prompt(info, image_urls, map_url, plan_urls)
         update(6, 'Generation Gamma (~2 min)...')
         gamma_url = create_gamma(prompt)
         jobs[job_id]['status'] = 'done'
@@ -375,21 +380,44 @@ def _palette(pil):
     return len(c), white
 
 
-def extract_photos(pdf_path, max_photos=6):
-    """Photos réelles uniquement, de façon ADAPTATIVE (aucun seuil de pixels rigide) :
-    - saute la page 1 (logo/couverture du confrère),
-    - dédoublonne (md5),
-    - écarte logos/plans (palette pauvre) et pages-documents (fond très blanc),
-    - garde les images au format 'photo' (ratio raisonnable, taille non-vignette),
-    - classe par qualité photographique (richesse de palette) et prend les meilleures.
-    Fonctionne quelle que soit la résolution du confrère (JLL ~380x260, CBRE, BNP, etc.)."""
+def _page_labels(pdf_path):
+    """Texte (minuscule) de chaque page, pour repérer les sections « Photos » / « Plans »."""
+    labels = {}
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                labels[i] = (page.extract_text() or "").lower()
+    except Exception:
+        pass
+    return labels
+
+
+def _save(data, path):
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    if im.width > 1500:
+        im = im.resize((1500, int(im.height * 1500 / im.width)))
+    im.save(path, "JPEG", quality=85)
+    return path
+
+
+def extract_media(pdf_path, max_photos=12, max_plans=4):
+    """Sépare PHOTOS et PLANS.
+    Priorité au titre de section de la page (« Photos », « Plans ») quand le confrère
+    en met un (cas JLL/BNP/CBRE) ; sinon on retombe sur l'analyse de palette.
+    - photos : toutes les vraies photos (dédoublonnées), pas seulement quelques-unes ;
+    - plans  : les plans d'étage (RDC/RDJ…), classiquement sur fond blanc avec des traits.
+    Saute la page 1 (couverture confrère) et les logos/vignettes."""
     reader = PdfReader(pdf_path)
+    labels = _page_labels(pdf_path)
     temp_dir = tempfile.mkdtemp()
-    cands = []
+    photos, plans = [], []
     seen = set()
     for pn, page in enumerate(reader.pages):
-        if pn == 0:  # page 1 = logo/couverture confrère
+        if pn == 0:
             continue
+        txt = labels.get(pn, "")
+        is_plan_page = "plan" in txt
+        is_photo_page = "photo" in txt
         try:
             page_imgs = list(page.images)
         except Exception:
@@ -400,38 +428,52 @@ def extract_photos(pdf_path, max_photos=6):
             except Exception:
                 continue
             h = hashlib.md5(data).hexdigest()
-            if h in seen:               # dédoublonnage strict
+            if h in seen:
                 continue
             seen.add(h)
             try:
                 pil = Image.open(io.BytesIO(data)); w, ht = pil.size
             except Exception:
                 continue
-            # écarte les vraies vignettes/icônes, mais SANS seuil trop haut
-            if min(w, ht) < 180 or (w * ht) < 55000:
+            if min(w, ht) < 180 or (w * ht) < 55000:   # vignettes/logos écartés
                 continue
             ar = w / ht
-            if not (0.75 <= ar <= 2.6):   # bandeaux/logos très allongés écartés
+            if not (0.55 <= ar <= 3.2):                 # bandeaux extrêmes écartés
                 continue
             dist, white = _palette(pil)
-            if dist < 28 or white >= 0.62:  # palette pauvre = plan/logo ; très blanc = page texte
-                continue
-            # score : privilégie une palette riche ET une image de bonne taille
-            score = dist * 1.0 + (w * ht) / 200000.0
-            cands.append({"data": data, "score": score, "dist": dist, "px": w * ht})
-    # les plus "photographiques" et les plus grandes d'abord
-    cands.sort(key=lambda x: x["score"], reverse=True)
-    paths = []
-    for i, c in enumerate(cands[:max_photos]):
-        try:
-            p = os.path.join(temp_dir, f"photo_{i}.jpg")
-            im = Image.open(io.BytesIO(c["data"])).convert("RGB")
-            if im.width > 1400:
-                im = im.resize((1400, int(im.height * 1400 / im.width)))
-            im.save(p, "JPEG", quality=85); paths.append(p)
-        except Exception:
-            pass
-    return paths
+            # --- classification ---
+            if is_plan_page:
+                kind = "plan"
+            elif is_photo_page:
+                kind = "photo" if dist >= 20 else None   # évite un logo sur la page photos
+            else:
+                # pas de titre exploitable : palette
+                if dist >= 28 and white < 0.55:
+                    kind = "photo"
+                elif dist >= 12 and white >= 0.55 and min(w, ht) >= 450:
+                    kind = "plan"                        # fond blanc + traits + GRAND = vrai plan
+                else:
+                    kind = None                          # petits plans-vignettes / mini-cartes exclus
+            if kind == "photo":
+                photos.append({"data": data, "dist": dist, "px": w * ht})
+            elif kind == "plan":
+                plans.append({"data": data, "px": w * ht})
+    # photos : les plus « photographiques »/grandes d'abord, on les prend TOUTES (plafond de sécurité)
+    photos.sort(key=lambda x: x["dist"] + x["px"] / 200000.0, reverse=True)
+    plans.sort(key=lambda x: x["px"], reverse=True)
+    photo_paths, plan_paths = [], []
+    for i, c in enumerate(photos[:max_photos]):
+        try: photo_paths.append(_save(c["data"], os.path.join(temp_dir, f"photo_{i}.jpg")))
+        except Exception: pass
+    for i, c in enumerate(plans[:max_plans]):
+        try: plan_paths.append(_save(c["data"], os.path.join(temp_dir, f"plan_{i}.jpg")))
+        except Exception: pass
+    return {"photos": photo_paths, "plans": plan_paths}
+
+
+def extract_photos(pdf_path, max_photos=12):
+    """Compat : renvoie uniquement les chemins photos."""
+    return extract_media(pdf_path, max_photos=max_photos)["photos"]
 
 
 # ============ CARTE OpenStreetMap + CERCLE 300 m (100 % requests + PIL, sans dépendance) ============
@@ -524,25 +566,31 @@ def upload_image(path):
 
 
 # ============ PROMPT (from-template validé) ============
-def build_prompt(d, photo_urls, map_url):
+def build_prompt(d, photo_urls, map_url, plan_urls=None):
+    plan_urls = plan_urls or []
     vente = d.get("transaction") == "vente"
     def lst(x): return " ; ".join([str(i) for i in (x or [])])
     titles = d.get("card_titles") or ["Coûts récurrents", "Coûts à l'entrée", "Données juridiques"]
     surf = "\n".join(f"- {row[0]}/{row[1]}/{row[2]}" for row in d.get("surfaces", []) if len(row) == 3)
     dess = "\n".join(f"- {x}" for x in d.get("desserte", []))
     gal = "\n".join(f"![]({u})" for u in photo_urls)
+    plans_md = "\n".join(f"![]({u})" for u in plan_urls)
     eq = " ; ".join(f"{c['name']} {c['email']} {c['phone']}" for c in EQUIPE)
     mp = f"\nCarte de situation (rayon 300 m) : ![]({map_url})" if map_url else ""
     dispo = f" — Disponibilité : {d['dispo']}" if d.get("dispo") else ""
-    return f"""Conserve EXACTEMENT la structure, l'ordre des cartes et la mise en page de ce modèle. Remplace le contenu par ce bien, en français, chiffres au mot près, et INSÈRE les images fournies aux emplacements images du modèle (galeries, carte d'accès). N'ajoute aucune page. SUR LA COUVERTURE : CONSERVE le bandeau violet du modèle tel quel — ne le remplace JAMAIS par une photo, garde juste le titre/adresse et le logo du modèle. PHOTOS : n'utilise CHAQUE photo qu'UNE SEULE FOIS — AUCUN DOUBLON. Si le modèle a plus d'emplacements photos que de photos fournies, SUPPRIME les cartes photos en trop plutôt que de dupliquer. AGRANDIS la carte de situation sur la carte « Accès » : grande, pleine largeur. NE mets AUCUN titre du type « à retravailler ».
+    plans_block = (f"""
+
+PLANS (plans d'étage du bien — crée une carte « Plans » dédiée et affiche TOUS ces plans en grand, pleine largeur, l'un sous l'autre) :
+{plans_md}""" if plan_urls else "")
+    return f"""Conserve la structure, l'ordre des cartes et la mise en page de ce modèle, MAIS adapte le nombre de cartes photos au nombre de photos fournies. Remplace le contenu par ce bien, en français, chiffres au mot près, et INSÈRE les images fournies aux emplacements images du modèle. SUR LA COUVERTURE : CONSERVE le bandeau violet du modèle tel quel — ne le remplace JAMAIS par une photo, garde juste le titre/adresse et le logo du modèle. PHOTOS : affiche TOUTES les photos fournies ci-dessous (n'en supprime AUCUNE), chacune UNE SEULE FOIS — AUCUN DOUBLON ; s'il y a plus de photos que d'emplacements dans le modèle, AJOUTE autant de cartes galerie que nécessaire pour toutes les montrer. PLANS : ajoute une carte « Plans » dédiée avec les plans fournis. AGRANDIS la carte de situation sur la carte « Accès » : grande, pleine largeur. NE mets AUCUN titre du type « à retravailler ».
 
 COUVERTURE (garde le bandeau violet) : {d.get('adresse','')} — Bureaux à {'vendre' if vente else 'louer'} — {d.get('surface_full','')}{dispo}
 
 À RETENIR SUR L'IMMEUBLE : {lst(d.get('immeuble'))}
 À RETENIR SUR LES LOCAUX : {lst(d.get('locaux'))}
 
-GALERIE (photos réelles du bien) :
-{gal}
+GALERIE — AFFICHE TOUTES CES PHOTOS ({len(photo_urls)} photos réelles du bien, aucune à retirer) :
+{gal}{plans_block}
 
 {titles[0].upper()} : {lst(d.get('recurrents'))}
 {titles[1].upper()} : {lst(d.get('entree'))}
