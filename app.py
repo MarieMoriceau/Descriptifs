@@ -15,6 +15,8 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
+VERSION = "2026-09-22-adaptive-photos+map"
+
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
 GAMMA_THEME_ID      = "fo87qe3vn58hou1"
@@ -241,6 +243,12 @@ def index():
     return render_template_string(HTML)
 
 
+@app.route('/version')
+def version():
+    """Permet de vérifier quelle version du code tourne réellement en ligne."""
+    return jsonify({"version": VERSION})
+
+
 @app.route('/upload', methods=['POST'])
 def upload():
     if 'pdf' not in request.files:
@@ -367,9 +375,14 @@ def _palette(pil):
     return len(c), white
 
 
-def extract_photos(pdf_path, min_kb=15):
-    """Photos réelles uniquement : skip page 1 (logo confrère), dédoublonnage,
-    on écarte les images 'document' (fond très blanc) et les logos/plans (palette pauvre)."""
+def extract_photos(pdf_path, max_photos=6):
+    """Photos réelles uniquement, de façon ADAPTATIVE (aucun seuil de pixels rigide) :
+    - saute la page 1 (logo/couverture du confrère),
+    - dédoublonne (md5),
+    - écarte logos/plans (palette pauvre) et pages-documents (fond très blanc),
+    - garde les images au format 'photo' (ratio raisonnable, taille non-vignette),
+    - classe par qualité photographique (richesse de palette) et prend les meilleures.
+    Fonctionne quelle que soit la résolution du confrère (JLL ~380x260, CBRE, BNP, etc.)."""
     reader = PdfReader(pdf_path)
     temp_dir = tempfile.mkdtemp()
     cands = []
@@ -377,30 +390,39 @@ def extract_photos(pdf_path, min_kb=15):
     for pn, page in enumerate(reader.pages):
         if pn == 0:  # page 1 = logo/couverture confrère
             continue
-        for idx, img in enumerate(page.images):
-            data = img.data
-            if len(data) / 1024 < min_kb:
+        try:
+            page_imgs = list(page.images)
+        except Exception:
+            page_imgs = []
+        for img in page_imgs:
+            try:
+                data = img.data
+            except Exception:
                 continue
             h = hashlib.md5(data).hexdigest()
-            if h in seen:      # dédoublonnage strict
+            if h in seen:               # dédoublonnage strict
                 continue
             seen.add(h)
             try:
                 pil = Image.open(io.BytesIO(data)); w, ht = pil.size
             except Exception:
                 continue
-            if w < 500 or ht < 350:
+            # écarte les vraies vignettes/icônes, mais SANS seuil trop haut
+            if min(w, ht) < 180 or (w * ht) < 55000:
                 continue
             ar = w / ht
-            if not (0.85 <= ar <= 2.3):    # bandeaux/logos allongés
+            if not (0.75 <= ar <= 2.6):   # bandeaux/logos très allongés écartés
                 continue
             dist, white = _palette(pil)
-            if dist < 30 or white >= 0.60:  # palette pauvre = plan/logo ; très blanc = page texte
+            if dist < 28 or white >= 0.62:  # palette pauvre = plan/logo ; très blanc = page texte
                 continue
-            cands.append({"data": data, "dist": dist, "size": len(data)})
-    cands.sort(key=lambda x: x["dist"], reverse=True)   # les plus "photographiques" d'abord
+            # score : privilégie une palette riche ET une image de bonne taille
+            score = dist * 1.0 + (w * ht) / 200000.0
+            cands.append({"data": data, "score": score, "dist": dist, "px": w * ht})
+    # les plus "photographiques" et les plus grandes d'abord
+    cands.sort(key=lambda x: x["score"], reverse=True)
     paths = []
-    for i, c in enumerate(cands[:6]):
+    for i, c in enumerate(cands[:max_photos]):
         try:
             p = os.path.join(temp_dir, f"photo_{i}.jpg")
             im = Image.open(io.BytesIO(c["data"])).convert("RGB")
