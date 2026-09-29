@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
-VERSION = "2026-09-29-conditions-v2"
+VERSION = "2026-09-29-fidelite-modele"
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
@@ -605,7 +605,7 @@ def build_prompt(d, photo_urls, map_url, plan_urls=None):
     plan_urls = plan_urls or []
     vente = d.get("transaction") == "vente"
     def lst(x): return " ; ".join([str(i) for i in (x or [])])
-    titles = d.get("card_titles") or ["Conditions financières (HT/HC)", "Honoraires & frais", "Conditions du bail"]
+    titles = d.get("card_titles") or ["Coûts récurrents", "Coûts à l'entrée", "Données juridiques"]
     surf = "\n".join(f"- {row[0]}/{row[1]}/{row[2]}" for row in d.get("surfaces", []) if len(row) == 3)
     dess = "\n".join(f"- {x}" for x in d.get("desserte", []))
     gal = "\n".join(f"![]({u})" for u in photo_urls)
@@ -615,9 +615,9 @@ def build_prompt(d, photo_urls, map_url, plan_urls=None):
     dispo = f" — Disponibilité : {d['dispo']}" if d.get("dispo") else ""
     plans_block = (f"""
 
-PLANS (plans d'étage du bien — crée une carte « Plans » dédiée et affiche TOUS ces plans en grand, pleine largeur, l'un sous l'autre) :
+PLANS (à placer UNIQUEMENT dans l'emplacement plans du modèle — affiche TOUS ces plans en grand, pleine largeur, l'un sous l'autre) :
 {plans_md}""" if plan_urls else "")
-    return f"""Conserve la structure, l'ordre des cartes et la mise en page de ce modèle, MAIS adapte le nombre de cartes photos au nombre de photos fournies. Remplace le contenu par ce bien, en français, chiffres au mot près, et INSÈRE les images fournies aux emplacements images du modèle. SUR LA COUVERTURE : CONSERVE le bandeau violet du modèle tel quel — ne le remplace JAMAIS par une photo, garde juste le titre/adresse et le logo du modèle. PHOTOS : affiche TOUTES les photos fournies ci-dessous (n'en supprime AUCUNE), chacune UNE SEULE FOIS — AUCUN DOUBLON ; s'il y a plus de photos que d'emplacements dans le modèle, AJOUTE autant de cartes galerie que nécessaire pour toutes les montrer. PLANS : ajoute une carte « Plans » dédiée avec les plans fournis. AGRANDIS la carte de situation sur la carte « Accès » : grande, pleine largeur. NE mets AUCUN titre du type « à retravailler ».
+    return f"""RESPECTE STRICTEMENT ce modèle : garde EXACTEMENT ses cartes, leur ORDRE, leurs INTITULÉS et sa mise en page. Tu ne fais que REMPLACER le contenu par celui de ce bien (français, chiffres au mot près). RÈGLE ABSOLUE : n'invente et n'ajoute AUCUNE carte qui n'existe pas dans le modèle (JAMAIS de carte « Parkings », « Prestations », « Climatisation », etc.). Toute information de conditions financières entre dans les TROIS cartes existantes ci-dessous et NULLE PART ailleurs — le parking va dans « {titles[0]} ». SUR LA COUVERTURE : CONSERVE le bandeau violet du modèle tel quel — ne le remplace JAMAIS par une photo, garde juste le titre/adresse et le logo du modèle. PHOTOS : mets TOUTES les photos fournies dans la ou les galeries photos du modèle, chacune UNE SEULE FOIS (AUCUN DOUBLON) ; utilise UNIQUEMENT les emplacements galerie existants (agrandis la galerie si besoin), sans créer de carte au titre nouveau. AGRANDIS la carte de situation sur la carte « Accès » : grande, pleine largeur. NE mets AUCUN titre du type « à retravailler ».
 
 COUVERTURE (garde le bandeau violet) : {d.get('adresse','')} — Bureaux à {'vendre' if vente else 'louer'} — {d.get('surface_full','')}{dispo}
 
@@ -627,6 +627,7 @@ COUVERTURE (garde le bandeau violet) : {d.get('adresse','')} — Bureaux à {'ve
 GALERIE — AFFICHE TOUTES CES PHOTOS ({len(photo_urls)} photos réelles du bien, aucune à retirer) :
 {gal}{plans_block}
 
+CARTES CONDITIONS — remplis EXACTEMENT ces trois cartes du modèle, ni plus ni moins :
 {titles[0].upper()} : {lst(d.get('recurrents'))}
 {titles[1].upper()} : {lst(d.get('entree'))}
 {titles[2].upper()} : {lst(d.get('juridiques'))}
