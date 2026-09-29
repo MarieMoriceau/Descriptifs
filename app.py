@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
-VERSION = "2026-09-22-nolimit-photos+plans+map"
+VERSION = "2026-09-29-conditions-v2"
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
@@ -342,10 +342,11 @@ EXTRACT_SCHEMA = """Renvoie UNIQUEMENT un JSON valide (aucun texte autour) :
 Règles STRICTES :
 - français, chiffres AU MOT PRÈS depuis le document, n'invente rien (mets "" ou omets si absent).
 - "adresse" ex : "60 Rue Jouffroy d'Abbans — 75017 Paris".
-- "surfaces" : classe DU PLUS HAUT ÉTAGE AU PLUS BAS, et termine par ["","TOTAL","… m²"].
-- "recurrents" : loyer, charges, taxe bureaux, impôt foncier, TEOM (selon dispo).
-- "entree" : dépôt de garantie, honoraires, frais d'acte.
-- "juridiques" : bail, régime fiscal, indexation, paiement.
+- "surfaces" : classe DU PLUS HAUT ÉTAGE AU PLUS BAS (ex R+4, puis R+3, puis R-2/archives), et termine par ["","TOTAL","… m²"]. Inclus TOUS les lots (bureaux ET archives/parkings s'ils ont une surface).
+- IMPORTANT — CONDITIONS : recopie CHAQUE ligne des sections « Conditions financières » et « Conditions du bail » du document, VERBATIM (libellé : valeur), sans rien résumer ni omettre. Si un champ existe dans le PDF, il DOIT apparaître.
+- "recurrents" (= Conditions financières HT/HC) : NE DOIT JAMAIS ÊTRE VIDE. Mets-y, si présents : Loyer (€/m²/an), Charges annuelles, Commentaires/détail des charges (par étage), Taxe foncière, Taxe bureaux, Impôt foncier, Année de référence impôt foncier, TEOM, Parking. NE PAS y mettre le régime fiscal (il va dans "juridiques"). À défaut de section dédiée, prends au moins le loyer dans les BANDEAUX d'en-tête.
+- "entree" (= Honoraires & frais) : Honoraires preneur (%), Frais de rédaction d'acte, autres frais d'entrée. NE PAS ajouter de ligne "Paiement des honoraires".
+- "juridiques" (= Conditions du bail) : Type de bail, Durée du bail, Régime fiscal, Indice / Indexation, Dépôt de garantie, Paiement du loyer.
 - pour une VENTE : "card_titles" = ["Prix & charges","Acquisition","Le bien"] et mets le prix dans "recurrents".
 - NE reprends PAS les coordonnées de l'agent du confrère (remplacées par l'équipe Équation)."""
 
@@ -370,14 +371,38 @@ def parse_info_with_claude(text):
     return d
 
 
-# ============ PHOTOS (pypdf, dédoublonnées, filtre "page-document") ============
-def _palette(pil):
-    im = pil.convert("RGB").resize((64, 64))
-    px = list(im.getdata()); n = len(px)
-    from collections import Counter
-    q = [(r // 32, g // 32, b // 32) for r, g, b in px]; c = Counter(q)
-    white = sum(1 for r, g, b in px if r > 225 and g > 225 and b > 225) / n
-    return len(c), white
+# ============ PHOTOS / PLANS (pypdf, classifieur robuste + dédup visuelle) ============
+def _imgstats(pil):
+    """Retourne (frac_blanc, frac_midtones). Séparateur fiable photo vs plan :
+    une PHOTO a peu de blanc pur et beaucoup de tons moyens (murs/sol/mobilier),
+    un PLAN (dessin au trait sur fond blanc) a beaucoup de blanc et peu de midtones."""
+    im = pil.convert("RGB").resize((72, 72)); px = list(im.getdata()); n = len(px)
+    white = mid = 0
+    for r, g, b in px:
+        l = 0.299 * r + 0.587 * g + 0.114 * b
+        if l > 235:
+            white += 1
+        elif 55 < l < 232:
+            mid += 1
+    return white / n, mid / n
+
+
+def _dhash(pil, hs=8):
+    """Empreinte perceptuelle (difference hash) pour repérer les images visuellement
+    identiques même ré-encodées (source des photos/plans en double ou triple)."""
+    im = pil.convert("L").resize((hs + 1, hs)); px = list(im.getdata())
+    bits = 0; k = 0
+    for r in range(hs):
+        for c in range(hs):
+            i = r * (hs + 1) + c
+            if px[i + 1] > px[i]:
+                bits |= (1 << k)
+            k += 1
+    return bits
+
+
+def _hamming(a, b):
+    return bin(a ^ b).count("1")
 
 
 def _page_labels(pdf_path):
@@ -401,17 +426,21 @@ def _save(data, path):
 
 
 def extract_media(pdf_path, max_photos=None, max_plans=None):
-    """Sépare PHOTOS et PLANS.
-    Priorité au titre de section de la page (« Photos », « Plans ») quand le confrère
-    en met un (cas JLL/BNP/CBRE) ; sinon on retombe sur l'analyse de palette.
-    - photos : toutes les vraies photos (dédoublonnées), pas seulement quelques-unes ;
-    - plans  : les plans d'étage (RDC/RDJ…), classiquement sur fond blanc avec des traits.
+    """Sépare PHOTOS et PLANS de façon robuste, SANS dépendre des titres de section
+    (BNP n'en met pas). Classifieur basé sur la mesure de l'image :
+      - PHOTO : peu de blanc pur (<0.25) et beaucoup de tons moyens (>0.60) ;
+      - PLAN  : dessin au trait — beaucoup de blanc (>0.42), peu de midtones (<0.55), GRAND (≥500 px) ;
+        (les tuiles de carte Google, 256 px, sont ainsi écartées par la taille).
+    Déduplication à deux niveaux : md5 (octets) ET empreinte perceptuelle (dhash),
+    ce qui élimine les photos/plans en double ou triple même ré-encodés.
+    Un titre de page « Photos »/« Plans » sert seulement de coup de pouce si la mesure hésite.
     Saute la page 1 (couverture confrère) et les logos/vignettes."""
     reader = PdfReader(pdf_path)
     labels = _page_labels(pdf_path)
     temp_dir = tempfile.mkdtemp()
     photos, plans = [], []
-    seen = set()
+    seen_md5 = set()
+    seen_hash = []   # empreintes perceptuelles déjà retenues
     for pn, page in enumerate(reader.pages):
         if pn == 0:
             continue
@@ -428,9 +457,9 @@ def extract_media(pdf_path, max_photos=None, max_plans=None):
             except Exception:
                 continue
             h = hashlib.md5(data).hexdigest()
-            if h in seen:
+            if h in seen_md5:
                 continue
-            seen.add(h)
+            seen_md5.add(h)
             try:
                 pil = Image.open(io.BytesIO(data)); w, ht = pil.size
             except Exception:
@@ -440,26 +469,30 @@ def extract_media(pdf_path, max_photos=None, max_plans=None):
             ar = w / ht
             if not (0.55 <= ar <= 3.2):                 # bandeaux extrêmes écartés
                 continue
-            dist, white = _palette(pil)
-            # --- classification ---
-            if is_plan_page:
+            # --- dédup visuelle (tue les doublons/triplons ré-encodés) ---
+            dh = _dhash(pil)
+            if any(_hamming(dh, k) <= 5 for k in seen_hash):
+                continue
+            seen_hash.append(dh)
+            # --- classification par mesure ---
+            white, mid = _imgstats(pil)
+            big = min(w, ht) >= 500
+            if white < 0.25 and mid > 0.60:
+                kind = "photo"
+            elif big and white > 0.42 and mid < 0.55:
                 kind = "plan"
-            elif is_photo_page:
-                kind = "photo" if dist >= 20 else None   # évite un logo sur la page photos
+            elif is_photo_page and white < 0.40:
+                kind = "photo"                           # coup de pouce titre
+            elif is_plan_page and big:
+                kind = "plan"
             else:
-                # pas de titre exploitable : palette
-                if dist >= 28 and white < 0.55:
-                    kind = "photo"
-                elif dist >= 12 and white >= 0.55 and min(w, ht) >= 450:
-                    kind = "plan"                        # fond blanc + traits + GRAND = vrai plan
-                else:
-                    kind = None                          # petits plans-vignettes / mini-cartes exclus
+                kind = None
             if kind == "photo":
-                photos.append({"data": data, "dist": dist, "px": w * ht})
+                photos.append({"data": data, "score": mid, "px": w * ht})
             elif kind == "plan":
                 plans.append({"data": data, "px": w * ht})
-    # photos : les plus « photographiques »/grandes d'abord, on les prend TOUTES (plafond de sécurité)
-    photos.sort(key=lambda x: x["dist"] + x["px"] / 200000.0, reverse=True)
+    # photos : les plus riches en contenu / les plus grandes d'abord, on les prend TOUTES
+    photos.sort(key=lambda x: x["score"] + x["px"] / 400000.0, reverse=True)
     plans.sort(key=lambda x: x["px"], reverse=True)
     photos_sel = photos if max_photos is None else photos[:max_photos]
     plans_sel = plans if max_plans is None else plans[:max_plans]
@@ -572,7 +605,7 @@ def build_prompt(d, photo_urls, map_url, plan_urls=None):
     plan_urls = plan_urls or []
     vente = d.get("transaction") == "vente"
     def lst(x): return " ; ".join([str(i) for i in (x or [])])
-    titles = d.get("card_titles") or ["Coûts récurrents", "Coûts à l'entrée", "Données juridiques"]
+    titles = d.get("card_titles") or ["Conditions financières (HT/HC)", "Honoraires & frais", "Conditions du bail"]
     surf = "\n".join(f"- {row[0]}/{row[1]}/{row[2]}" for row in d.get("surfaces", []) if len(row) == 3)
     dess = "\n".join(f"- {x}" for x in d.get("desserte", []))
     gal = "\n".join(f"![]({u})" for u in photo_urls)
