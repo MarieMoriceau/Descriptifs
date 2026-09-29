@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
-VERSION = "2026-09-29-vision-CBRE"
+VERSION = "2026-09-29-vision-CBRE-plans-propres"
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
@@ -431,6 +431,17 @@ def _imgstats(pil):
     return white / n, mid / n
 
 
+def _colored_frac(pil):
+    """Fraction de pixels nettement colorés (grandes zones de couleur = plan d'étage colorié).
+    Une page de texte (conditions) ou une carte terne en a très peu."""
+    im = pil.convert("RGB").resize((80, 80)); px = list(im.getdata()); n = len(px); c = 0
+    for r, g, b in px:
+        mx = max(r, g, b); mn = min(r, g, b)
+        if (mx - mn) > 45 and mx > 40:
+            c += 1
+    return c / n
+
+
 def _dhash(pil, hs=8):
     """Empreinte perceptuelle (difference hash) pour repérer les images visuellement
     identiques même ré-encodées (source des photos/plans en double ou triple)."""
@@ -520,15 +531,20 @@ def extract_media(pdf_path, max_photos=None, max_plans=None):
             seen_hash.append(dh)
             # --- classification par mesure ---
             white, mid = _imgstats(pil)
+            colored = _colored_frac(pil)
             big = min(w, ht) >= 500
+            square_small = (0.9 <= ar <= 1.1) and max(w, ht) <= 720   # carte Google static (~640²)
+            doc_page = colored < 0.08 and mid < 0.35 and 0.45 <= white <= 0.78  # couverture/conditions CBRE (texte)
             if white < 0.25 and mid > 0.60:
                 kind = "photo"
-            elif big and white > 0.42 and mid < 0.55:
+            elif square_small or doc_page:
+                kind = None                              # carte de localisation / page conditions : écartées
+            elif big and white > 0.42 and mid < 0.62:
                 kind = "plan"
-            elif is_photo_page and white < 0.40:
-                kind = "photo"                           # coup de pouce titre
             elif is_plan_page and big:
                 kind = "plan"
+            elif is_photo_page and white < 0.40:
+                kind = "photo"
             else:
                 kind = None
             if kind == "photo":
