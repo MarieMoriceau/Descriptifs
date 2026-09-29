@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
-VERSION = "2026-09-29-fix-troncature-texte"
+VERSION = "2026-09-29-vision-CBRE"
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
