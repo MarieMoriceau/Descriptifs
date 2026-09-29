@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 jobs = {}
 
-VERSION = "2026-09-29-fidelite-modele"
+VERSION = "2026-09-29-fix-troncature-texte"
 
 GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
 IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
@@ -351,8 +351,11 @@ Règles STRICTES :
 - NE reprends PAS les coordonnées de l'agent du confrère (remplacées par l'équipe Équation)."""
 
 def parse_info_with_claude(text):
+    # IMPORTANT : ne pas couper trop tôt. Sur les plaquettes longues (BNP ~20 pages),
+    # la page « Conditions financières / Conditions du bail » se trouve au-delà de
+    # 19 000 caractères ; une limite trop basse la privait totalement à Claude.
     prompt = (f"Voici le texte brut d'un descriptif immobilier de bureaux (confrère).\n\n{EXTRACT_SCHEMA}\n\n"
-              f"=== TEXTE ===\n{text[:16000]}")
+              f"=== TEXTE ===\n{text[:60000]}")
     r = requests.post("https://api.anthropic.com/v1/messages",
         headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
