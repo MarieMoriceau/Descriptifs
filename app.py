@@ -281,8 +281,8 @@ def run_job(job_id, pdf_path, filename):
         update(1, 'Extraction du texte...')
         text = extract_text_from_pdf(pdf_path)
         update(2, 'Analyse Claude...')
-        info = parse_info_with_claude(text)
-        update(2, f"Adresse : {info.get('adresse','?')}")
+        info = parse_info_with_claude(text, pdf_path)
+        update(2, f"Adresse : {info.get('adresse','?')}" + (" (lecture image)" if info.get("_vision") else ""))
         update(3, 'Extraction photos + plans...')
         media = extract_media(pdf_path)            # photos ET plans, dédoublonnés
         photos, plans = media["photos"], media["plans"]
@@ -350,17 +350,57 @@ Règles STRICTES :
 - pour une VENTE : "card_titles" = ["Prix & charges","Acquisition","Le bien"] et mets le prix dans "recurrents".
 - NE reprends PAS les coordonnées de l'agent du confrère (remplacées par l'équipe Équation)."""
 
-def parse_info_with_claude(text):
-    # IMPORTANT : ne pas couper trop tôt. Sur les plaquettes longues (BNP ~20 pages),
-    # la page « Conditions financières / Conditions du bail » se trouve au-delà de
-    # 19 000 caractères ; une limite trop basse la privait totalement à Claude.
-    prompt = (f"Voici le texte brut d'un descriptif immobilier de bureaux (confrère).\n\n{EXTRACT_SCHEMA}\n\n"
-              f"=== TEXTE ===\n{text[:60000]}")
+def _text_is_thin(text):
+    """Vrai si le PDF ne contient pas de vraies données texte exploitables
+    (cas CBRE : tout est dans une image → pdfplumber ne lit que des en-têtes)."""
+    t = (text or "").lower()
+    has_money = any(k in t for k in ["loyer", "bail", "charges", "dépôt", "honoraires", "€/", "/m²", "surface"])
+    return len(text or "") < 3000 or not has_money
+
+
+def _render_pages_b64(pdf_path, max_pages=6, dpi=150):
+    """Rend les premières pages du PDF en PNG base64 (pour lecture vision par Claude).
+    Utilisé quand le texte est illisible/absent (plaquettes 100 % image type CBRE)."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        return []
+    out = []
+    try:
+        doc = fitz.open(pdf_path)
+        for i in range(min(max_pages, doc.page_count)):
+            try:
+                pix = doc[i].get_pixmap(dpi=dpi)
+                out.append(base64.b64encode(pix.tobytes("png")).decode())
+            except Exception:
+                continue
+        doc.close()
+    except Exception:
+        pass
+    return out
+
+
+def parse_info_with_claude(text, pdf_path=None):
+    # Texte long : on ne coupe qu'à 60 000 caractères (les conditions BNP sont à ~19 000).
+    # Texte maigre/illisible (CBRE 100 % image) : on bascule en VISION — on envoie les
+    # premières pages en image et Claude lit directement le tableau des conditions/surfaces.
+    prompt = (f"Voici un descriptif immobilier de bureaux (confrère).\n\n{EXTRACT_SCHEMA}\n\n"
+              f"Certaines informations (conditions, surfaces, loyer) peuvent se trouver "
+              f"UNIQUEMENT dans les IMAGES jointes (plaquettes type CBRE) : lis-les attentivement.\n\n"
+              f"=== TEXTE EXTRAIT ===\n{text[:60000]}")
+    content = [{"type": "text", "text": prompt}]
+    used_vision = False
+    if pdf_path and _text_is_thin(text):
+        imgs = _render_pages_b64(pdf_path)
+        for b64 in imgs:
+            content.append({"type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": b64}})
+        used_vision = len(imgs) > 0
     r = requests.post("https://api.anthropic.com/v1/messages",
         headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
         json={"model": CLAUDE_MODEL, "max_tokens": 2000,
-              "messages": [{"role": "user", "content": prompt}]}, timeout=90)
+              "messages": [{"role": "user", "content": content}]}, timeout=120)
     if r.status_code != 200:
         raise ValueError(f"Claude API {r.status_code}: {r.text[:200]}")
     raw = r.json()["content"][0]["text"]
@@ -369,6 +409,7 @@ def parse_info_with_claude(text):
         raise ValueError("Claude n'a pas renvoyé de JSON")
     d = json.loads(m.group(0))
     d.setdefault("transaction", "location")
+    d["_vision"] = used_vision
     for k in ["immeuble", "locaux", "recurrents", "entree", "juridiques", "surfaces", "desserte"]:
         d.setdefault(k, [])
     return d
