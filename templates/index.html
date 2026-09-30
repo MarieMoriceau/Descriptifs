@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Carte prospection terrain</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --vert:#2e9e4f; --rouge:#d64541;
+    --bg:#f6f7f9; --panel:#fff; --ink:#1b2330; --muted:#6b7482; --line:#e4e7ec; --accent:#1b2330;
+    --Marine:#8e5bd6; --Lionel:#2f6fdb; --Richard:#e8772e; --Nicolas:#d6479b; --Sébastien:#8b5a2b; --autre:#9aa3ae;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:Inter,system-ui,sans-serif;color:var(--ink);background:var(--bg)}
+  #app{display:grid;grid-template-columns:360px 1fr;height:100%}
+  aside{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  header{padding:16px 16px 12px;border-bottom:1px solid var(--line)}
+  h1{font-size:17px;margin:0 0 4px;font-weight:700;letter-spacing:-.01em}
+  .sub{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  button{font:inherit;cursor:pointer}
+  .btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 9px;font-size:12px}
+  .btn:hover{background:var(--bg)}
+  .filters{padding:12px 16px;border-bottom:1px solid var(--line);display:grid;gap:10px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{display:flex;align-items:center;gap:6px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 10px;font-size:13px;opacity:.45}
+  .chip.on{opacity:1;border-color:currentColor}
+  .chip i{width:10px;height:10px;border-radius:50%;display:inline-block}
+  .chip small{color:var(--muted)}
+  .row{display:flex;gap:8px}
+  select,input{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:#fff;flex:1;min-width:0}
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  .kpi{background:var(--bg);border-radius:8px;padding:8px}
+  .kpi b{display:block;font-size:18px}
+  .kpi span{font-size:11px;color:var(--muted)}
+  #list{overflow:auto;flex:1;padding:6px 8px 20px}
+  details{border-radius:8px}
+  summary{list-style:none;cursor:pointer;padding:8px;border-radius:8px;display:flex;align-items:center;gap:8px}
+  summary::-webkit-details-marker{display:none}
+  summary:hover{background:var(--bg)}
+  .nego>summary{font-weight:600;font-size:14px}
+  .street>summary{font-size:13px;padding-left:22px}
+  .count{margin-left:auto;font-size:12px;color:var(--muted);white-space:nowrap}
+  .bld{display:flex;gap:8px;padding:5px 8px 5px 40px;font-size:13px;border-radius:6px;cursor:pointer}
+  .bld:hover{background:var(--bg)}
+  .bld .count{font-weight:600;color:var(--ink)}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .warn{margin:12px 8px 0;padding:10px;border:1px dashed #d9a441;border-radius:8px;background:#fffaf0;font-size:12px}
+  .warn a{color:inherit}
+  #map{height:100%}
+  .pin{display:flex;align-items:center;justify-content:center;border-radius:50%;color:#fff;font-weight:700;font-size:12px;
+       border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35)}
+  .pin span{background:rgba(0,0,0,.28);border-radius:50%;width:70%;height:70%;display:flex;align-items:center;justify-content:center}
+  .pin.flash{animation:fl 1s ease 2}
+  @keyframes fl{50%{transform:scale(1.5)}}
+  .leaflet-popup-content{margin:12px 14px;font-family:Inter,system-ui,sans-serif;min-width:240px}
+  .pp h3{font-size:14px;margin:0 0 2px}
+  .pp .tot{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .pp table{border-collapse:collapse;width:100%;font-size:12px}
+  .pp td{padding:3px 4px;border-top:1px solid var(--line);vertical-align:top}
+  .pp td a{color:var(--ink)}
+  .tag{font-size:10px;padding:1px 5px;border-radius:4px;background:#e8f5ec;color:#20703a}
+  .pp .scroll{max-height:220px;overflow:auto}
+  .tabs{display:grid;grid-template-columns:1fr 1fr;background:var(--bg);border-radius:9px;padding:3px}
+  .tabs button{border:0;background:none;border-radius:7px;padding:6px;font-size:13px;color:var(--muted)}
+  .tabs button.on{background:#fff;color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);align-items:center}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  .sec>summary{font-weight:600;font-size:14px}
+  .age{font-size:11px;color:var(--muted);margin-left:6px}
+  .empty{padding:16px;font-size:13px;color:var(--muted)}
+  #toggle{display:none}
+  #err{display:none;margin:12px 16px;padding:10px;border-radius:8px;background:#fdecec;color:#9b1c1c;font-size:13px}
+  @media (max-width:760px){
+    #app{grid-template-columns:1fr;grid-template-rows:1fr}
+    aside{position:fixed;inset:auto 0 0 0;height:62%;z-index:1000;border-radius:14px 14px 0 0;box-shadow:0 -4px 20px rgba(0,0,0,.15);transform:translateY(calc(100% - 58px));transition:transform .25s}
+    aside.open{transform:none}
+    #toggle{display:block;position:absolute;right:12px;top:12px}
+    #map{position:fixed;inset:0}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <header>
+      <h1>🚶 Prospection terrain</h1>
+      <div class="sub"><span id="upd">Chargement…</span><button class="btn" id="refresh">↻ Rafraîchir</button></div>
+      <button class="btn" id="toggle">Filtres ▴</button>
+    </header>
+    <div id="err"></div>
+    <div class="filters">
+      <div class="tabs"><button data-mode="nego" class="on">Par négo</button><button data-mode="secteur">Secteurs</button></div>
+      <div class="chips" id="chips"></div>
+      <div class="legend" id="legend" hidden></div>
+      <div class="row">
+        <select id="period">
+          <option value="0">Toutes les visites</option>
+          <option value="7">7 derniers jours</option>
+          <option value="30">30 derniers jours</option>
+          <option value="90">90 derniers jours</option>
+        </select>
+        <input id="q" placeholder="Société ou rue…">
+      </div>
+      <div class="kpis">
+        <div class="kpi"><b id="k-rel">–</b><span id="l-rel">relevés</span></div>
+        <div class="kpi"><b id="k-bld">–</b><span id="l-bld">immeubles</span></div>
+        <div class="kpi"><b id="k-str">–</b><span id="l-str">rues</span></div>
+      </div>
+    </div>
+    <div id="list"></div>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const css = getComputedStyle(document.documentElement);
+const color = n => (css.getPropertyValue('--' + n).trim() || css.getPropertyValue('--autre').trim());
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtDate = d => d ? new Date(d + 'T12:00:00').toLocaleDateString('fr-FR', {day:'2-digit', month:'short', year:'2-digit'}) : '';
+const num = label => parseInt(label, 10) || 0;
+
+const map = L.map('map', {zoomControl: true}).setView([48.8695, 2.347], 15);
+// Fond « Plan IGN » (Géoplateforme, gratuit, sans clé)
+L.tileLayer('https://data.geopf.fr/wmts?REQUEST=GetTile&SERVICE=WMTS&VERSION=1.0.0&STYLE=normal&TILEMATRIXSET=PM&FORMAT=image/png&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}', {
+  maxZoom: 19, attribution: '© IGN – Géoplateforme'
+}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+
+let DATA = null, markers = {}, firstFit = true;
+const state = {mode: 'nego', negos: null, secNego: null, period: 0, q: ''};
+const secLayer = L.layerGroup().addTo(map);
+
+async function load(force) {
+  try {
+    const r = await fetch('api/data' + (force ? '?force=1' : ''));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    DATA = j;
+    document.getElementById('err').style.display = 'none';
+    const t = new Date(j.updated_at);
+    document.getElementById('upd').textContent = 'Notion lu à ' + t.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+    if (!state.negos) state.negos = new Set(j.records.map(r => r.nego));
+    render();
+  } catch (e) {
+    const el = document.getElementById('err');
+    el.textContent = 'Impossible de lire les données : ' + e.message;
+    el.style.display = 'block';
+  }
+}
+
+function filtered() {
+  const since = state.period ? Date.now() - state.period * 864e5 : 0;
+  const q = state.q.trim().toLowerCase();
+  return DATA.records.filter(r => {
+    if (!state.negos.has(r.nego)) return false;
+    if (since && new Date(r.date).getTime() < since) return false;
+    if (q) {
+      const b = DATA.buildings[r.b];
+      if (!(r.societe.toLowerCase().includes(q) || (b.label || '').toLowerCase().includes(q))) return false;
+    }
+    return true;
+  });
+}
+
+function renderChips() {
+  const counts = {};
+  DATA.records.forEach(r => counts[r.nego] = (counts[r.nego] || 0) + 1);
+  const el = document.getElementById('chips');
+  el.innerHTML = '';
+  Object.keys(counts).sort((a, b) => counts[b] - counts[a]).forEach(n => {
+    const c = document.createElement('button');
+    c.className = 'chip' + (state.negos.has(n) ? ' on' : '');
+    c.style.color = color(n);
+    c.innerHTML = `<i style="background:${color(n)}"></i><span style="color:var(--ink)">${esc(n)}</span><small>${counts[n]}</small>`;
+    c.onclick = () => { state.negos.has(n) ? state.negos.delete(n) : state.negos.add(n); render(); };
+    c.ondblclick = () => { state.negos = new Set([n]); render(); };
+    c.title = 'Clic : afficher/masquer · double-clic : ce négo seul';
+    el.appendChild(c);
+  });
+}
+
+function pinHtml(byNego, total) {
+  const entries = Object.entries(byNego).sort((a, b) => b[1] - a[1]);
+  let bg;
+  if (entries.length === 1) bg = color(entries[0][0]);
+  else {
+    let acc = 0; const stops = [];
+    entries.forEach(([n, c]) => { const a = acc / total * 360; acc += c; stops.push(`${color(n)} ${a}deg ${acc / total * 360}deg`); });
+    bg = `conic-gradient(${stops.join(',')})`;
+  }
+  const size = Math.round(22 + Math.min(26, Math.sqrt(total) * 5));
+  return {html: `<div class="pin" style="width:${size}px;height:${size}px;background:${bg}"><span>${total}</span></div>`, size};
+}
+
+function popupHtml(b, recs) {
+  const by = {};
+  recs.forEach(r => by[r.nego] = (by[r.nego] || 0) + 1);
+  const split = Object.entries(by).map(([n, c]) => `<span style="color:${color(n)}">●</span> ${esc(n)} ${c}`).join(' · ');
+  const rows = recs.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')).map(r => `
+    <tr><td><span class="dot" style="display:inline-block;background:${color(r.nego)}"></span></td>
+    <td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.societe)}</a>
+      ${r.recherche === 'Oui' ? '<span class="tag">en recherche</span>' : ''}<br>
+      <span style="color:var(--muted)">${[r.etage && 'ét. ' + r.etage, r.type, fmtDate(r.date)].filter(Boolean).map(esc).join(' · ')}</span></td></tr>`).join('');
+  return `<div class="pp"><h3>${esc(b.label)}</h3>
+    <div class="tot"><b>${recs.length}</b> société${recs.length > 1 ? 's' : ''} relevée${recs.length > 1 ? 's' : ''} — ${split}
+    ${b.precise ? '' : '<br>⚠︎ position approximative (numéro non trouvé)'}</div>
+    <div class="scroll"><table>${rows}</table></div></div>`;
+}
+
+function render() {
+  const isSec = state.mode === 'secteur';
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.mode === state.mode));
+  document.getElementById('period').style.display = isSec ? 'none' : '';
+  document.getElementById('legend').hidden = !isSec;
+  [['l-rel', isSec ? 'vus récemment' : 'relevés'], ['l-bld', isSec ? 'à revoir' : 'immeubles'], ['l-str', isSec ? 'relevés' : 'rues']]
+    .forEach(([id, t]) => document.getElementById(id).textContent = t);
+  if (isSec) return renderSecteurs();
+  secLayer.clearLayers();
+  renderChips();
+  const recs = filtered();
+  const perB = {};
+  recs.forEach(r => (perB[r.b] = perB[r.b] || []).push(r));
+
+  // --- carte
+  layer.clearLayers(); markers = {};
+  const pts = [];
+  Object.entries(perB).forEach(([k, list]) => {
+    const b = DATA.buildings[k];
+    const by = {}; list.forEach(r => by[r.nego] = (by[r.nego] || 0) + 1);
+    const {html, size} = pinHtml(by, list.length);
+    const m = L.marker([b.lat, b.lon], {icon: L.divIcon({html, className: '', iconSize: [size, size]})})
+      .bindPopup(popupHtml(b, list), {maxWidth: 340});
+    m.addTo(layer); markers[k] = m; pts.push([b.lat, b.lon]);
+  });
+  if (firstFit && pts.length) { map.fitBounds(pts, {padding: [40, 40], maxZoom: 17}); firstFit = false; }
+
+  // --- KPI
+  const streets = new Set(Object.keys(perB).map(k => DATA.buildings[k].street));
+  document.getElementById('k-rel').textContent = recs.length;
+  document.getElementById('k-bld').textContent = Object.keys(perB).length;
+  document.getElementById('k-str').textContent = streets.size;
+
+  // --- liste négo → rue → immeuble
+  const tree = {};
+  recs.forEach(r => {
+    const b = DATA.buildings[r.b];
+    const n = tree[r.nego] = tree[r.nego] || {};
+    const s = n[b.street] = n[b.street] || {};
+    s[r.b] = (s[r.b] || 0) + 1;
+  });
+  const list = document.getElementById('list');
+  const open = new Set([...list.querySelectorAll('details[open]')].map(d => d.dataset.id));
+  const firstRender = !list.dataset.done;
+  list.innerHTML = '';
+  Object.keys(tree).sort().forEach(n => {
+    const streetsN = tree[n];
+    const tot = Object.values(streetsN).reduce((a, s) => a + Object.values(s).reduce((x, y) => x + y, 0), 0);
+    const nb = Object.values(streetsN).reduce((a, s) => a + Object.keys(s).length, 0);
+    const d = document.createElement('details'); d.className = 'nego'; d.dataset.id = n;
+    d.open = firstRender ? Object.keys(tree).length === 1 : open.has(n);
+    d.innerHTML = `<summary><span class="dot" style="background:${color(n)}"></span>${esc(n)}
+      <span class="count">${Object.keys(streetsN).length} rues · ${nb} imm. · ${tot} rel.</span></summary>`;
+    Object.entries(streetsN).sort((a, b) => sum(b[1]) - sum(a[1])).forEach(([st, blds]) => {
+      const ds = document.createElement('details'); ds.className = 'street'; ds.dataset.id = n + '|' + st;
+      ds.open = open.has(ds.dataset.id);
+      ds.innerHTML = `<summary>${esc(st)}<span class="count">${Object.keys(blds).length} imm. · ${sum(blds)} rel.</span></summary>`;
+      ds.querySelector('summary').addEventListener('click', () => focusKeys(Object.keys(blds)));
+      Object.entries(blds).sort((a, b) => num(DATA.buildings[a[0]].label) - num(DATA.buildings[b[0]].label)).forEach(([k, c]) => {
+        const row = document.createElement('div'); row.className = 'bld';
+        const lab = DATA.buildings[k].label.replace(/ \d{5} Paris$/, '');
+        row.innerHTML = `<span>${esc(lab)}</span><span class="count">${c} sté${c > 1 ? 's' : ''}</span>`;
+        row.onclick = () => { focusKeys([k]); markers[k] && markers[k].openPopup(); closeSheet(); };
+        ds.appendChild(row);
+      });
+      d.appendChild(ds);
+    });
+    list.appendChild(d);
+  });
+  list.dataset.done = 1;
+
+  // --- adresses non localisées
+  const unl = DATA.unlocated.filter(r => state.negos.has(r.nego));
+  if (unl.length) {
+    const w = document.createElement('div'); w.className = 'warn';
+    w.innerHTML = `<b>${unl.length} relevé${unl.length > 1 ? 's' : ''} non placé${unl.length > 1 ? 's' : ''}</b> — adresse vide ou introuvable, à corriger dans Notion :<br>` +
+      unl.map(r => `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.ref || r.societe)}</a> ${esc(r.adresse || '(vide)')} <small>(${esc(r.nego)})</small>`).join('<br>');
+    list.appendChild(w);
+  }
+}
+const sum = o => Object.values(o).reduce((a, b) => a + b, 0);
+
+// ================================================================ SECTEURS
+function inPoly(lat, lon, poly) {            // ray casting, poly = [[lat,lon],…]
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [yi, xi] = poly[i], [yj, xj] = poly[j];
+    if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function cutoffDate() {
+  const d = new Date(); d.setMonth(d.getMonth() - (DATA.fresh_months || 2));
+  return d.toISOString().slice(0, 10);
+}
+const daysAgo = d => Math.max(0, Math.round((Date.now() - new Date(d + 'T12:00:00')) / 864e5));
+const ago = d => { const n = daysAgo(d); return n === 0 ? "aujourd'hui" : n < 60 ? `il y a ${n} j` : `il y a ${Math.round(n / 30)} mois`; };
+
+function renderSecChips() {
+  const secs = DATA.secteurs || {};
+  const all = [...new Set([...Object.keys(secs), ...DATA.records.map(r => r.nego)])].filter(n => n !== 'Non renseigné').sort();
+  if (!state.secNego || !all.includes(state.secNego)) state.secNego = Object.keys(secs)[0] || all[0];
+  const el = document.getElementById('chips'); el.innerHTML = '';
+  all.forEach(n => {
+    const c = document.createElement('button');
+    c.className = 'chip' + (state.secNego === n ? ' on' : '');
+    c.style.color = color(n);
+    const nb = (secs[n] || []).length;
+    c.innerHTML = `<i style="background:${color(n)}"></i><span style="color:var(--ink)">${esc(n)}</span><small>${nb ? nb + ' sect.' : '—'}</small>`;
+    c.onclick = () => { state.secNego = n; state.fitSec = true; render(); };
+    el.appendChild(c);
+  });
+  document.getElementById('legend').innerHTML =
+    `<span><i style="background:var(--vert)"></i>vu depuis moins de ${DATA.fresh_months} mois</span><span><i style="background:var(--rouge)"></i>plus ancien</span>`;
+}
+
+function renderSecteurs() {
+  renderSecChips();
+  layer.clearLayers(); secLayer.clearLayers(); markers = {};
+  const n = state.secNego, secs = (DATA.secteurs || {})[n] || [];
+  const list = document.getElementById('list'); list.innerHTML = '';
+  if (!secs.length) {
+    list.innerHTML = `<div class="empty">Aucun secteur défini pour ${esc(n)}.</div>`;
+    ['k-rel', 'k-bld', 'k-str'].forEach(id => document.getElementById(id).textContent = '–');
+    return;
+  }
+  const cut = cutoffDate(), q = state.q.trim().toLowerCase();
+  const green = css.getPropertyValue('--vert').trim(), red = css.getPropertyValue('--rouge').trim();
+  // relevés par immeuble : uniquement les visites du négo sélectionné
+  const perB = {};
+  DATA.records.forEach(r => {
+    if (r.nego !== n) return;
+    if (q) { const b = DATA.buildings[r.b]; if (!(r.societe.toLowerCase().includes(q) || b.label.toLowerCase().includes(q))) return; }
+    (perB[r.b] = perB[r.b] || []).push(r);
+  });
+  const bounds = [];
+  let nFresh = 0, nOld = 0, nRel = 0;
+  secs.forEach((sec, i) => {
+    const poly = L.polygon(sec.contour, {color: color(n), weight: 2, dashArray: '6 4', fillOpacity: .06}).addTo(secLayer);
+    poly.bindTooltip(sec.nom, {sticky: true});
+    bounds.push(...sec.contour);
+    const inside = Object.keys(perB).filter(k => { const b = DATA.buildings[k]; return inPoly(b.lat, b.lon, sec.contour); });
+    const streets = {};
+    inside.forEach(k => {
+      const recs = perB[k], b = DATA.buildings[k];
+      const last = recs.map(r => r.date).filter(Boolean).sort().pop() || '';
+      const fresh = last >= cut;
+      fresh ? nFresh++ : nOld++; nRel += recs.length;
+      const size = Math.round(22 + Math.min(26, Math.sqrt(recs.length) * 5));
+      if (!markers[k]) {
+        const html = `<div class="pin" style="width:${size}px;height:${size}px;background:${fresh ? green : red}"><span>${recs.length}</span></div>`;
+        markers[k] = L.marker([b.lat, b.lon], {icon: L.divIcon({html, className: '', iconSize: [size, size]})})
+          .bindPopup(popupHtml(b, recs).replace('<div class="scroll">',
+            `<div class="tot" style="margin-top:-4px"><span style="color:${fresh ? green : red}">●</span> Dernière visite : <b>${fmtDate(last)}</b> (${ago(last)})</div><div class="scroll">`), {maxWidth: 340})
+          .addTo(layer);
+      }
+      (streets[b.street] = streets[b.street] || []).push({k, n: recs.length, last, fresh});
+    });
+    // liste : secteur → rue → immeuble
+    const d = document.createElement('details'); d.className = 'sec'; d.open = true;
+    const fr = inside.filter(k => (perB[k].map(r => r.date).sort().pop() || '') >= cut).length;
+    d.innerHTML = `<summary><span class="dot" style="background:${color(n)}"></span>${esc(sec.nom)}
+      <span class="count"><span style="color:${green}">●</span> ${fr} · <span style="color:${red}">●</span> ${inside.length - fr}</span></summary>`;
+    d.querySelector('summary').addEventListener('click', () => map.fitBounds(sec.contour, {padding: [30, 30]}));
+    if (!inside.length) d.insertAdjacentHTML('beforeend', '<div class="empty">Aucun immeuble encore visité dans ce secteur.</div>');
+    Object.entries(streets).sort((a, b) => a[0].localeCompare(b[0], 'fr')).forEach(([st, blds]) => {
+      const ds = document.createElement('details'); ds.className = 'street';
+      const old = blds.filter(x => !x.fresh).length;
+      ds.innerHTML = `<summary>${esc(st)}<span class="count">${blds.length} imm.${old ? ` · <span style="color:${red}">${old} à revoir</span>` : ''}</span></summary>`;
+      ds.querySelector('summary').addEventListener('click', () => focusKeys(blds.map(x => x.k)));
+      blds.sort((a, b) => num(DATA.buildings[a.k].label) - num(DATA.buildings[b.k].label)).forEach(x => {
+        const row = document.createElement('div'); row.className = 'bld';
+        row.innerHTML = `<span class="dot" style="margin-top:5px;background:${x.fresh ? green : red}"></span>
+          <span>${esc(DATA.buildings[x.k].label.replace(/ \d{5} Paris$/, ''))}<span class="age">${ago(x.last)}</span></span>
+          <span class="count">${x.n} sté${x.n > 1 ? 's' : ''}</span>`;
+        row.onclick = () => { focusKeys([x.k]); markers[x.k].openPopup(); closeSheet(); };
+        ds.appendChild(row);
+      });
+      d.appendChild(ds);
+    });
+    list.appendChild(d);
+  });
+  document.getElementById('k-rel').textContent = nFresh;
+  document.getElementById('k-bld').textContent = nOld;
+  document.getElementById('k-str').textContent = nRel;
+  if (state.fitSec !== false && bounds.length) { map.fitBounds(bounds, {padding: [30, 30]}); state.fitSec = false; }
+}
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  state.mode = b.dataset.mode; state.fitSec = true;
+  if (state.mode === 'nego') firstFit = true;
+  render();
+});
+
+function focusKeys(keys) {
+  const pts = keys.map(k => DATA.buildings[k]).map(b => [b.lat, b.lon]);
+  if (pts.length === 1) map.setView(pts[0], 18); else map.fitBounds(pts, {padding: [60, 60], maxZoom: 18});
+  keys.forEach(k => { const el = markers[k]?.getElement()?.firstChild; if (el) { el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); } });
+}
+
+const side = document.getElementById('side');
+const closeSheet = () => side.classList.remove('open');
+document.getElementById('toggle').onclick = () => side.classList.toggle('open');
+document.getElementById('refresh').onclick = () => load(true);
+document.getElementById('period').onchange = e => { state.period = +e.target.value; render(); };
+let t; document.getElementById('q').oninput = e => { clearTimeout(t); t = setTimeout(() => { state.q = e.target.value; render(); }, 200); };
+
+load(false);
+setInterval(() => { if (!document.hidden) load(false); }, 120000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(false); });
+</script>
+</body>
+</html>
