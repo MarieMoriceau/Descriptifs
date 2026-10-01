@@ -1,257 +1,730 @@
+#!/usr/bin/env python3
 """
-Carte de prospection terrain — Equation-sie
-Lit la base Notion « Prospection terrain » à chaque ouverture (cache 60 s),
-géocode les adresses via la BAN et affiche une carte par négociateur.
+Equation SIE — PDF -> Gamma (descriptif FINI, sur le modèle MODELE 369)
+Version intégrée : extraction Claude + photos (dédoublonnées) + carte Google 300 m
++ prompt validé (bandeau violet conservé, contacts Équation, étages haut->bas, sans doublon).
+Remplace l'ancien app.py. Même structure Flask / jobs / imgbb / from-template.
 """
-import os
-import re
-import json
-import time
-import threading
-import unicodedata
-from concurrent.futures import ThreadPoolExecutor
-from functools import wraps
-
+import os, json, re, base64, tempfile, time, io, math, hashlib, threading
 import requests
-from flask import Flask, jsonify, render_template, request, Response
-
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
-NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "c70e0416a7d64dd990011f222bf5a4e7")
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
-NOTION_TTL = int(os.environ.get("NOTION_TTL", "60"))  # secondes
-FRESH_MONTHS = int(os.environ.get("FRESH_MONTHS", "2"))  # vert si vu depuis moins de N mois
-SECTEURS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secteurs.json")
-GEOCACHE_FILE = os.environ.get("GEOCACHE_FILE", "/tmp/geocache.json")
+import pdfplumber
+from pypdf import PdfReader
+from PIL import Image, ImageDraw
+from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
+jobs = {}
 
-# ---------------------------------------------------------------- auth ----
-def protected(f):
-    @wraps(f)
-    def wrapper(*a, **kw):
-        if APP_PASSWORD:
-            auth = request.authorization
-            if not auth or auth.password != APP_PASSWORD:
-                return Response("Accès réservé", 401,
-                                {"WWW-Authenticate": 'Basic realm="Carte prospection"'})
-        return f(*a, **kw)
-    return wrapper
+VERSION = "2026-09-29-vision-CBRE-plans-propres"
 
-# -------------------------------------------------------------- notion ----
-_notion_cache = {"at": 0, "rows": None}
-_notion_lock = threading.Lock()
+GAMMA_API_KEY       = "sk-gamma-KLU47Xtpm0WkqYoQ4DEh0qZSKOOjcZr4hBb0G79m9Rg"
+IMGBB_API_KEY       = "be39115664b38075a21de95d2ef95ba1"
+GAMMA_THEME_ID      = "fo87qe3vn58hou1"
+GAMMA_TEMPLATE_ID   = "g_s502jxfcibkr6kq"
+GOOGLE_MAPS_API_KEY = "AIzaSyAGE65fo1453M-5CGe162Klk8NjS9K0hJA"
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL        = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
+# Équipe Équation — remplace systématiquement les contacts du confrère
+EQUIPE = [
+    {"name": "Lionel Bastian", "email": "lbastian@equation-sie.com", "phone": "07 82 83 67 43"},
+    {"name": "Marine Bureau de Rotalier", "email": "mbureau@equation-sie.com", "phone": "06 18 98 23 31"},
+    {"name": "Richard Abou Khalil", "email": "rabou-khalil@equation-sie.com", "phone": "06 27 86 54 71"},
+]
 
-def _txt(prop):
-    if not prop:
-        return ""
-    t = prop.get("type")
-    if t in ("title", "rich_text"):
-        return "".join(x.get("plain_text", "") for x in prop.get(t) or []).strip()
-    if t == "select":
-        return (prop.get("select") or {}).get("name", "") or ""
-    if t == "date":
-        return ((prop.get("date") or {}).get("start") or "")[:10]
-    if t == "unique_id":
-        u = prop.get("unique_id") or {}
-        return f"{u.get('prefix') or 'PR'}-{u.get('number')}" if u.get("number") else ""
-    return ""
+HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF vers Gamma — Equation SIE</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #f0f2f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+  .card { background: white; border-radius: 16px; padding: 2.5rem 2rem; width: 100%; max-width: 560px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; }
+  .dots { display: flex; justify-content: center; gap: 8px; margin-bottom: 1.5rem; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-red { background: #e53935; }
+  .dot-dark { background: #37474f; }
+  .dot-blue { background: #90a4ae; }
+  h1 { font-size: 1.6rem; font-weight: 700; color: #1a1a2e; margin-bottom: 0.4rem; }
+  .subtitle { color: #6b7280; font-size: 0.95rem; margin-bottom: 2rem; }
+  .info-box { background: #f8f9fa; border-left: 4px solid #e53935; border-radius: 6px; padding: 0.85rem 1rem; margin-bottom: 2rem; text-align: left; }
+  .info-title { font-weight: 600; color: #1a1a2e; font-size: 0.95rem; }
+  .info-sub { color: #6b7280; font-size: 0.85rem; margin-top: 0.2rem; }
+  .drop-zone { border: 2px dashed #d1d5db; border-radius: 10px; padding: 2rem 1.5rem; cursor: pointer; transition: all 0.2s; position: relative; margin-bottom: 1rem; }
+  .drop-zone:hover, .drop-zone.dragover { border-color: #e53935; background: #fff5f5; }
+  .drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .drop-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+  .drop-zone h3 { font-size: 0.95rem; color: #374151; font-weight: 500; }
+  .drop-zone p { font-size: 0.82rem; color: #9ca3af; margin-top: 0.25rem; }
+  .files-list { margin-bottom: 1rem; display: none; }
+  .files-list.visible { display: block; }
+  .file-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem; background: #f8f9fa; border-radius: 8px; margin-bottom: 0.4rem; font-size: 0.85rem; }
+  .file-item .fname { flex: 1; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .file-item .fremove { color: #9ca3af; cursor: pointer; font-size: 1rem; padding: 0 4px; }
+  .file-item .fremove:hover { color: #e53935; }
+  .btn { width: 100%; padding: 0.9rem; background: #e53935; color: white; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+  .btn:hover { background: #c62828; }
+  .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+  .jobs-list { margin-top: 1.2rem; display: none; }
+  .jobs-list.visible { display: block; }
+  .job-item { padding: 0.85rem 1rem; border-radius: 8px; margin-bottom: 0.6rem; font-size: 0.88rem; text-align: left; border: 1px solid #e5e7eb; }
+  .job-item .job-name { font-weight: 600; color: #1a1a2e; margin-bottom: 0.3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .job-item .job-log { color: #6b7280; font-size: 0.78rem; }
+  .job-item.running { border-color: #93c5fd; background: #f0f4ff; }
+  .job-item.done { border-color: #86efac; background: #f0fdf4; }
+  .job-item.error { border-color: #fca5a5; background: #fff5f5; }
+  .job-item .gamma-link { display: inline-block; margin-top: 0.4rem; padding: 0.3rem 0.8rem; background: #16a34a; color: white; text-decoration: none; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
+  .new-btn { background: none; border: 1px solid #d1d5db; color: #6b7280; width: 100%; padding: 0.6rem; border-radius: 8px; font-size: 0.85rem; cursor: pointer; margin-top: 0.75rem; }
+  .new-btn:hover { border-color: #e53935; color: #e53935; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(59,91,219,0.3); border-top-color: #3b5bdb; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 4px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="dots">
+    <div class="dot dot-red"></div>
+    <div class="dot dot-dark"></div>
+    <div class="dot dot-blue"></div>
+  </div>
+  <h1>PDF &#8594; Gamma</h1>
+  <p class="subtitle">Equation SIE &#8212; Descriptifs commerciaux</p>
+  <div class="info-box">
+    <div class="info-title">Convertir un ou plusieurs descriptifs</div>
+    <div class="info-sub">Glissez 1 ou plusieurs PDFs &#8212; les Gammas se generent en parallele</div>
+  </div>
+  <div class="drop-zone" id="dropZone">
+    <input type="file" id="fileInput" accept=".pdf" multiple>
+    <div class="drop-icon">&#128196;</div>
+    <h3>Deposez vos PDFs ici</h3>
+    <p>ou cliquez pour parcourir (selection multiple possible)</p>
+  </div>
+  <div class="files-list" id="filesList"></div>
+  <button class="btn" id="launchBtn" disabled onclick="launch()">&#128202; Generer les Gammas</button>
+  <div class="jobs-list" id="jobsList"></div>
+</div>
+<script>
+let selectedFiles = [];
+let activeJobs = {};
+let pollInterval = null;
 
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
 
-def fetch_notion(force=False):
-    with _notion_lock:
-        if not force and _notion_cache["rows"] is not None and time.time() - _notion_cache["at"] < NOTION_TTL:
-            return _notion_cache["rows"]
-        headers = {
-            "Authorization": f"Bearer {NOTION_TOKEN}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  addFiles(Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.pdf')));
+});
+fileInput.addEventListener('change', e => {
+  addFiles(Array.from(e.target.files));
+  fileInput.value = '';
+});
+
+function addFiles(files) {
+  files.forEach(f => {
+    if (!selectedFiles.find(sf => sf.name === f.name)) selectedFiles.push(f);
+  });
+  renderFilesList();
+}
+
+function removeFile(name) {
+  selectedFiles = selectedFiles.filter(f => f.name !== name);
+  renderFilesList();
+}
+
+function renderFilesList() {
+  const list = document.getElementById('filesList');
+  if (selectedFiles.length === 0) {
+    list.classList.remove('visible');
+    list.innerHTML = '';
+    document.getElementById('launchBtn').disabled = true;
+    return;
+  }
+  list.classList.add('visible');
+  list.innerHTML = selectedFiles.map(f =>
+    `<div class="file-item">
+      <span>&#128206;</span>
+      <span class="fname">${f.name}</span>
+      <span class="fremove" onclick="removeFile('${f.name.replace(/'/g,"\\'")}')">&#10005;</span>
+    </div>`
+  ).join('');
+  document.getElementById('launchBtn').disabled = false;
+  const n = selectedFiles.length;
+  document.getElementById('launchBtn').innerHTML = n > 1
+    ? `&#128202; Generer ${n} Gammas en parallele`
+    : '&#128202; Generer le Gamma';
+}
+
+async function launch() {
+  if (selectedFiles.length === 0) return;
+  document.getElementById('launchBtn').disabled = true;
+  const jobsDiv = document.getElementById('jobsList');
+  jobsDiv.classList.add('visible');
+  jobsDiv.innerHTML = '';
+  activeJobs = {};
+
+  for (const file of selectedFiles) {
+    const jobDiv = document.createElement('div');
+    jobDiv.className = 'job-item running';
+    jobDiv.id = 'job-' + file.name;
+    jobDiv.innerHTML = `<div class="job-name">&#128196; ${file.name}</div><div class="job-log"><span class="spinner"></span>Upload en cours...</div>`;
+    jobsDiv.appendChild(jobDiv);
+
+    const fd = new FormData();
+    fd.append('pdf', file);
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (data.job_id) {
+        activeJobs[data.job_id] = file.name;
+      } else {
+        updateJob(file.name, 'error', 'Erreur upload: ' + (data.error || '?'));
+      }
+    } catch(e) {
+      updateJob(file.name, 'error', 'Erreur reseau: ' + e.message);
+    }
+  }
+
+  if (Object.keys(activeJobs).length > 0) startPolling();
+}
+
+function updateJob(fname, status, logMsg, gammaUrl) {
+  const el = document.getElementById('job-' + fname);
+  if (!el) return;
+  el.className = 'job-item ' + status;
+  const spinner = status === 'running' ? '<span class="spinner"></span>' : '';
+  const icon = status === 'done' ? '&#10003; ' : status === 'error' ? '&#10005; ' : '';
+  const link = gammaUrl ? `<br><a class="gamma-link" href="${gammaUrl}" target="_blank">Ouvrir le Gamma &#8594;</a>` : '';
+  el.innerHTML = `<div class="job-name">&#128196; ${fname}</div><div class="job-log">${spinner}${icon}${logMsg}${link}</div>`;
+}
+
+function startPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(async () => {
+    const remaining = Object.keys(activeJobs);
+    if (remaining.length === 0) {
+      clearInterval(pollInterval);
+      document.getElementById('launchBtn').disabled = false;
+      document.getElementById('launchBtn').innerHTML = '&#128202; Generer de nouveaux Gammas';
+      selectedFiles = [];
+      renderFilesList();
+      return;
+    }
+    for (const jobId of remaining) {
+      try {
+        const res = await fetch('/status/' + jobId);
+        const data = await res.json();
+        const fname = activeJobs[jobId];
+        const lastLog = data.log?.[data.log.length - 1] || '...';
+        if (data.status === 'done') {
+          updateJob(fname, 'done', 'Gamma cree !', data.url);
+          delete activeJobs[jobId];
+        } else if (data.status === 'error') {
+          updateJob(fname, 'error', lastLog);
+          delete activeJobs[jobId];
+        } else {
+          updateJob(fname, 'running', lastLog);
         }
-        rows, cursor = [], None
-        while True:
-            body = {"page_size": 100}
-            if cursor:
-                body["start_cursor"] = cursor
-            r = requests.post(f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query",
-                              headers=headers, json=body, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            for p in data["results"]:
-                pr = p["properties"]
-                rows.append({
-                    "ref": _txt(pr.get("Réf")),
-                    "societe": _txt(pr.get("Société")) or "(sans nom)",
-                    "adresse": _txt(pr.get("Adresse")),
-                    "etage": _txt(pr.get("Étage")),
-                    "nego": _txt(pr.get("Négo")) or "Non renseigné",
-                    "date": _txt(pr.get("Date de visite")) or p.get("created_time", "")[:10],
-                    "recherche": _txt(pr.get("En recherche")),
-                    "type": _txt(pr.get("Type de société")),
-                    "url": p.get("url", ""),
-                })
-            if not data.get("has_more"):
-                break
-            cursor = data["next_cursor"]
-        _notion_cache.update(at=time.time(), rows=rows)
-        return rows
-
-# ------------------------------------------------------- normalisation ----
-ORDINAUX = {"premier": 1, "deuxième": 2, "deuxieme": 2, "troisième": 3, "troisieme": 3,
-            "quatrième": 4, "quatrieme": 4, "cinquième": 5, "cinquieme": 5, "sixième": 6,
-            "septième": 7, "huitième": 8, "huitieme": 8, "neuvième": 9, "neuvieme": 9,
-            "dixième": 10, "dixieme": 10, "onzième": 11, "douzième": 12}
+      } catch(e) {}
+    }
+  }, 3000);
+}
+</script>
+</body>
+</html>"""
 
 
-def normalize(addr):
-    """Nettoie une adresse saisie sur le terrain avant géocodage."""
-    s = (addr or "").replace("’", "'").replace("`", "'").strip()
-    s = re.sub(r"\briue\b", "rue", s, flags=re.I)
-    s = re.sub(r"\bbd\b\.?", "boulevard", s, flags=re.I)
-    s = re.sub(r"\bfbg\b\.?", "faubourg", s, flags=re.I)
-    s = re.sub(r"^(\d+)\s*(?:bis|ter)\b", r"\1", s, flags=re.I)          # « 10 bis » → « 10 » (même immeuble)
-    postcode = None
-    # « 3e arrondissement », « deuxième arrondissement », « , 9e »
-    m = re.search(r"(\d{1,2})\s*(?:e|er|ème|eme)\s*(?:arr\w*)?\s*(?:,|$)", s, flags=re.I)
-    if m and "étage" not in s[m.end():m.end() + 8].lower():
-        postcode = f"750{int(m.group(1)):02d}"
-        s = s[:m.start()] + s[m.end():]
-    for mot, n in ORDINAUX.items():
-        m2 = re.search(rf"\b{mot}\s+arrondissement\b", s, flags=re.I)
-        if m2:
-            postcode = f"750{n:02d}"
-            s = s[:m2.start()] + s[m2.end():]
-    s = re.sub(r",?\s*\d+\s*(?:e|er|ème|eme)\s*étage", "", s, flags=re.I)   # « 4e étage »
-    s = re.sub(r"\barrondissement\b", "", s, flags=re.I)
-    # « 31-33 rue » / « 17 21 rue » → premier numéro
-    s = re.sub(r"^(\d+)\s*(?:-|/|\s)\s*\d+\s+(?=[a-zA-Zéè])", r"\1 ", s)
-    s = re.sub(r"\s*,\s*", " ", s)
-    s = re.sub(r"\s+", " ", s).strip(" ,")
-    m3 = re.search(r"\b(75\d{3})\b", s)
-    if m3:
-        postcode = postcode or m3.group(1)
-        s = s.replace(m3.group(1), "")
-    s = re.sub(r"\bparis\b", "", s, flags=re.I).strip(" ,")
-    q = f"{s} {postcode or ''} Paris".replace("  ", " ").strip()
-    return q, postcode
-
-
-# ----------------------------------------------------------- géocodage ----
-_geocache = {}
-_geo_lock = threading.Lock()
-try:
-    with open(GEOCACHE_FILE) as fh:
-        _geocache = json.load(fh)
-except Exception:
-    pass
-
-
-def _ban(q, postcode):
-    params = {"q": q, "limit": 1, "lat": 48.8695, "lon": 2.3470}
-    if postcode:
-        params["postcode"] = postcode
-    for url in ("https://api-adresse.data.gouv.fr/search/",
-                "https://data.geopf.fr/geocodage/search"):
-        try:
-            r = requests.get(url, params=params, timeout=10)
-            if r.ok:
-                feats = r.json().get("features") or []
-                return feats[0] if feats else None
-        except Exception:
-            continue
-    raise ConnectionError("BAN injoignable")
-
-
-def geocode(addr):
-    key = (addr or "").strip().lower()
-    if not key:
-        return None
-    if key in _geocache:
-        return _geocache[key]
-    q, postcode = normalize(addr)
-    q_sans = re.sub(r"\b75\d{3}\b", "", q).replace("  ", " ")
-    res = None
-    tries = [(q_sans, None)] + ([(q, postcode)] if postcode else [])
-    # 1) sans arrondissement (les négos se trompent souvent d'arrondissement)
-    # 2) avec l'arrondissement saisi, en secours
-    for qq, pc in tries:
-        try:
-            f = _ban(qq, pc)
-        except ConnectionError:
-            return None          # pas mis en cache : on retentera au prochain chargement
-        if not f:
-            continue
-        p = f["properties"]
-        precise = p.get("type") == "housenumber"
-        ok = (p.get("postcode", "").startswith("75")
-              and p.get("score", 0) >= (0.6 if precise else 0.65)
-              and p.get("type") in ("housenumber", "street"))
-        if ok:
-            lon, lat = f["geometry"]["coordinates"]
-            cand = {
-                "key": p.get("id"),
-                "label": p.get("label"),
-                "street": p.get("street") or p.get("name"),
-                "postcode": p.get("postcode"),
-                "lat": lat, "lon": lon,
-                "precise": precise,
-                "score": round(p.get("score", 0), 2),
-            }
-            if precise:
-                res = cand
-                break
-            res = res or cand
-    with _geo_lock:
-        _geocache[key] = res
-        try:
-            with open(GEOCACHE_FILE, "w") as fh:
-                json.dump(_geocache, fh)
-        except Exception:
-            pass
-    return res
-
-
-# ---------------------------------------------------------------- routes --
-@app.route("/")
-@protected
+@app.route('/')
 def index():
-    return render_template("index.html")
+    return render_template_string(HTML)
 
 
-@app.route("/api/data")
-@protected
-def api_data():
-    force = request.args.get("force") == "1"
+@app.route('/version')
+def version():
+    """Permet de vérifier quelle version du code tourne réellement en ligne."""
+    return jsonify({"version": VERSION})
+
+
+@app.route('/upload', methods=['POST'])
+def upload():
+    if 'pdf' not in request.files:
+        return jsonify({'error': 'Pas de fichier PDF'}), 400
+    f = request.files['pdf']
+    filename = f.filename
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+    f.save(tmp.name)
+    tmp.close()
+    job_id = f"{int(time.time())}_{re.sub(r'[^a-zA-Z0-9]', '_', filename[:20])}"
+    jobs[job_id] = {'status': 'running', 'step': 0, 'log': [], 'url': '', 'filename': filename}
+    t = threading.Thread(target=run_job, args=(job_id, tmp.name, filename))
+    t.daemon = True
+    t.start()
+    return jsonify({'job_id': job_id})
+
+
+@app.route('/status/<path:job_id>')
+def status(job_id):
+    if job_id not in jobs:
+        return jsonify({'error': 'Job inconnu'}), 404
+    return jsonify(jobs[job_id])
+
+
+def run_job(job_id, pdf_path, filename):
+    def update(step, msg):
+        jobs[job_id]['step'] = step
+        jobs[job_id]['log'].append(msg)
     try:
-        rows = fetch_notion(force=force)
-    except requests.HTTPError as e:
-        return jsonify(error=f"Notion : {e.response.status_code} — vérifier le token et le partage de la base"), 502
-    todo = list({r["adresse"].strip().lower(): r["adresse"] for r in rows
-                 if r["adresse"] and r["adresse"].strip().lower() not in _geocache}.values())
-    if todo:
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            list(ex.map(geocode, todo))
-    buildings, records, unlocated = {}, [], []
-    for r in rows:
-        g = geocode(r["adresse"]) if r["adresse"] else None
-        if not g:
-            unlocated.append(r)
-            continue
-        buildings[g["key"]] = {k: g[k] for k in ("label", "street", "postcode", "lat", "lon", "precise")}
-        records.append({**r, "b": g["key"]})
+        update(1, 'Extraction du texte...')
+        text = extract_text_from_pdf(pdf_path)
+        update(2, 'Analyse Claude...')
+        info = parse_info_with_claude(text, pdf_path)
+        update(2, f"Adresse : {info.get('adresse','?')}" + (" (lecture image)" if info.get("_vision") else ""))
+        update(3, 'Extraction photos + plans...')
+        media = extract_media(pdf_path)            # photos ET plans, dédoublonnés
+        photos, plans = media["photos"], media["plans"]
+        update(3, f"{len(photos)} photo(s), {len(plans)} plan(s)")
+        update(4, 'Upload photos + plans + carte 300 m...')
+        image_urls = []
+        for path in photos:
+            u = upload_image(path)
+            if u: image_urls.append(u)
+        plan_urls = []
+        for path in plans:
+            u = upload_image(path)
+            if u: plan_urls.append(u)
+        map_url = build_map_300(info.get('adresse', ''))
+        update(4, "Carte 300 m OK" if map_url else "Carte non generee")
+        update(5, 'Construction du descriptif...')
+        prompt = build_prompt(info, image_urls, map_url, plan_urls)
+        update(6, 'Generation Gamma (~2 min)...')
+        gamma_url = create_gamma(prompt)
+        jobs[job_id]['status'] = 'done'
+        jobs[job_id]['url'] = gamma_url
+        jobs[job_id]['log'].append('Gamma cree !')
+    except Exception as e:
+        jobs[job_id]['status'] = 'error'
+        jobs[job_id]['log'].append(f'Erreur : {str(e)}')
+    finally:
+        try: os.unlink(pdf_path)
+        except: pass
+
+
+def extract_text_from_pdf(pdf_path):
+    parts = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            t = (page.extract_text() or "").strip()
+            if len(t) > 20:
+                parts.append(t)
+    return "\n\n".join(parts)
+
+
+# ============ EXTRACTION CLAUDE (schéma descriptif Équation) ============
+EXTRACT_SCHEMA = """Renvoie UNIQUEMENT un JSON valide (aucun texte autour) :
+{
+ "adresse": "N° rue — CODE Ville",
+ "transaction": "location" | "vente",
+ "surface_full": "…",
+ "dispo": "…",
+ "immeuble": ["…", ...],
+ "locaux": ["…", ...],
+ "recurrents": ["Label : valeur", ...],
+ "entree": ["Label : valeur", ...],
+ "juridiques": ["Label : valeur", ...],
+ "surfaces": [["Niveau","Type","Surface"], ...],
+ "desserte": ["…", ...],
+ "card_titles": null
+}
+Règles STRICTES :
+- français, chiffres AU MOT PRÈS depuis le document, n'invente rien (mets "" ou omets si absent).
+- "adresse" ex : "60 Rue Jouffroy d'Abbans — 75017 Paris".
+- "surfaces" : classe DU PLUS HAUT ÉTAGE AU PLUS BAS (ex R+4, puis R+3, puis R-2/archives), et termine par ["","TOTAL","… m²"]. Inclus TOUS les lots (bureaux ET archives/parkings s'ils ont une surface).
+- IMPORTANT — CONDITIONS : recopie CHAQUE ligne des sections « Conditions financières » et « Conditions du bail » du document, VERBATIM (libellé : valeur), sans rien résumer ni omettre. Si un champ existe dans le PDF, il DOIT apparaître.
+- "recurrents" (= Conditions financières HT/HC) : NE DOIT JAMAIS ÊTRE VIDE. Mets-y, si présents : Loyer (€/m²/an), Charges annuelles, Commentaires/détail des charges (par étage), Taxe foncière, Taxe bureaux, Impôt foncier, Année de référence impôt foncier, TEOM, Parking. NE PAS y mettre le régime fiscal (il va dans "juridiques"). À défaut de section dédiée, prends au moins le loyer dans les BANDEAUX d'en-tête.
+- "entree" (= Honoraires & frais) : Honoraires preneur (%), Frais de rédaction d'acte, autres frais d'entrée. NE PAS ajouter de ligne "Paiement des honoraires".
+- "juridiques" (= Conditions du bail) : Type de bail, Durée du bail, Régime fiscal, Indice / Indexation, Dépôt de garantie, Paiement du loyer.
+- pour une VENTE : "card_titles" = ["Prix & charges","Acquisition","Le bien"] et mets le prix dans "recurrents".
+- NE reprends PAS les coordonnées de l'agent du confrère (remplacées par l'équipe Équation)."""
+
+def _text_is_thin(text):
+    """Vrai si le PDF ne contient pas de vraies données texte exploitables
+    (cas CBRE : tout est dans une image → pdfplumber ne lit que des en-têtes)."""
+    t = (text or "").lower()
+    has_money = any(k in t for k in ["loyer", "bail", "charges", "dépôt", "honoraires", "€/", "/m²", "surface"])
+    return len(text or "") < 3000 or not has_money
+
+
+def _render_pages_b64(pdf_path, max_pages=6, dpi=150):
+    """Rend les premières pages du PDF en PNG base64 (pour lecture vision par Claude).
+    Utilisé quand le texte est illisible/absent (plaquettes 100 % image type CBRE)."""
     try:
-        with open(SECTEURS_FILE, encoding="utf-8") as fh:
-            secteurs = json.load(fh)
+        import fitz  # PyMuPDF
     except Exception:
-        secteurs = {}
-    return jsonify(updated_at=int(_notion_cache["at"] * 1000),
-                   secteurs=secteurs, fresh_months=FRESH_MONTHS,
-                   records=records, buildings=buildings, unlocated=unlocated)
+        return []
+    out = []
+    try:
+        doc = fitz.open(pdf_path)
+        for i in range(min(max_pages, doc.page_count)):
+            try:
+                pix = doc[i].get_pixmap(dpi=dpi)
+                out.append(base64.b64encode(pix.tobytes("png")).decode())
+            except Exception:
+                continue
+        doc.close()
+    except Exception:
+        pass
+    return out
 
 
-@app.route("/health")
-def health():
-    return "ok"
+def parse_info_with_claude(text, pdf_path=None):
+    # Texte long : on ne coupe qu'à 60 000 caractères (les conditions BNP sont à ~19 000).
+    # Texte maigre/illisible (CBRE 100 % image) : on bascule en VISION — on envoie les
+    # premières pages en image et Claude lit directement le tableau des conditions/surfaces.
+    prompt = (f"Voici un descriptif immobilier de bureaux (confrère).\n\n{EXTRACT_SCHEMA}\n\n"
+              f"Certaines informations (conditions, surfaces, loyer) peuvent se trouver "
+              f"UNIQUEMENT dans les IMAGES jointes (plaquettes type CBRE) : lis-les attentivement.\n\n"
+              f"=== TEXTE EXTRAIT ===\n{text[:60000]}")
+    content = [{"type": "text", "text": prompt}]
+    used_vision = False
+    if pdf_path and _text_is_thin(text):
+        imgs = _render_pages_b64(pdf_path)
+        for b64 in imgs:
+            content.append({"type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": b64}})
+        used_vision = len(imgs) > 0
+    r = requests.post("https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": CLAUDE_MODEL, "max_tokens": 2000,
+              "messages": [{"role": "user", "content": content}]}, timeout=120)
+    if r.status_code != 200:
+        raise ValueError(f"Claude API {r.status_code}: {r.text[:200]}")
+    raw = r.json()["content"][0]["text"]
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        raise ValueError("Claude n'a pas renvoyé de JSON")
+    d = json.loads(m.group(0))
+    d.setdefault("transaction", "location")
+    d["_vision"] = used_vision
+    for k in ["immeuble", "locaux", "recurrents", "entree", "juridiques", "surfaces", "desserte"]:
+        d.setdefault(k, [])
+    return d
 
 
-if __name__ == "__main__":
-    app.run(debug=True, port=int(os.environ.get("PORT", 5000)))
+# ============ PHOTOS / PLANS (pypdf, classifieur robuste + dédup visuelle) ============
+def _imgstats(pil):
+    """Retourne (frac_blanc, frac_midtones). Séparateur fiable photo vs plan :
+    une PHOTO a peu de blanc pur et beaucoup de tons moyens (murs/sol/mobilier),
+    un PLAN (dessin au trait sur fond blanc) a beaucoup de blanc et peu de midtones."""
+    im = pil.convert("RGB").resize((72, 72)); px = list(im.getdata()); n = len(px)
+    white = mid = 0
+    for r, g, b in px:
+        l = 0.299 * r + 0.587 * g + 0.114 * b
+        if l > 235:
+            white += 1
+        elif 55 < l < 232:
+            mid += 1
+    return white / n, mid / n
+
+
+def _colored_frac(pil):
+    """Fraction de pixels nettement colorés (grandes zones de couleur = plan d'étage colorié).
+    Une page de texte (conditions) ou une carte terne en a très peu."""
+    im = pil.convert("RGB").resize((80, 80)); px = list(im.getdata()); n = len(px); c = 0
+    for r, g, b in px:
+        mx = max(r, g, b); mn = min(r, g, b)
+        if (mx - mn) > 45 and mx > 40:
+            c += 1
+    return c / n
+
+
+def _dhash(pil, hs=8):
+    """Empreinte perceptuelle (difference hash) pour repérer les images visuellement
+    identiques même ré-encodées (source des photos/plans en double ou triple)."""
+    im = pil.convert("L").resize((hs + 1, hs)); px = list(im.getdata())
+    bits = 0; k = 0
+    for r in range(hs):
+        for c in range(hs):
+            i = r * (hs + 1) + c
+            if px[i + 1] > px[i]:
+                bits |= (1 << k)
+            k += 1
+    return bits
+
+
+def _hamming(a, b):
+    return bin(a ^ b).count("1")
+
+
+def _page_labels(pdf_path):
+    """Texte (minuscule) de chaque page, pour repérer les sections « Photos » / « Plans »."""
+    labels = {}
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                labels[i] = (page.extract_text() or "").lower()
+    except Exception:
+        pass
+    return labels
+
+
+def _save(data, path):
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    if im.width > 1500:
+        im = im.resize((1500, int(im.height * 1500 / im.width)))
+    im.save(path, "JPEG", quality=85)
+    return path
+
+
+def extract_media(pdf_path, max_photos=None, max_plans=None):
+    """Sépare PHOTOS et PLANS de façon robuste, SANS dépendre des titres de section
+    (BNP n'en met pas). Classifieur basé sur la mesure de l'image :
+      - PHOTO : peu de blanc pur (<0.25) et beaucoup de tons moyens (>0.60) ;
+      - PLAN  : dessin au trait — beaucoup de blanc (>0.42), peu de midtones (<0.55), GRAND (≥500 px) ;
+        (les tuiles de carte Google, 256 px, sont ainsi écartées par la taille).
+    Déduplication à deux niveaux : md5 (octets) ET empreinte perceptuelle (dhash),
+    ce qui élimine les photos/plans en double ou triple même ré-encodés.
+    Un titre de page « Photos »/« Plans » sert seulement de coup de pouce si la mesure hésite.
+    Saute la page 1 (couverture confrère) et les logos/vignettes."""
+    reader = PdfReader(pdf_path)
+    labels = _page_labels(pdf_path)
+    temp_dir = tempfile.mkdtemp()
+    photos, plans = [], []
+    seen_md5 = set()
+    seen_hash = []   # empreintes perceptuelles déjà retenues
+    for pn, page in enumerate(reader.pages):
+        if pn == 0:
+            continue
+        txt = labels.get(pn, "")
+        is_plan_page = "plan" in txt
+        is_photo_page = "photo" in txt
+        try:
+            page_imgs = list(page.images)
+        except Exception:
+            page_imgs = []
+        for img in page_imgs:
+            try:
+                data = img.data
+            except Exception:
+                continue
+            h = hashlib.md5(data).hexdigest()
+            if h in seen_md5:
+                continue
+            seen_md5.add(h)
+            try:
+                pil = Image.open(io.BytesIO(data)); w, ht = pil.size
+            except Exception:
+                continue
+            if min(w, ht) < 180 or (w * ht) < 55000:   # vignettes/logos écartés
+                continue
+            ar = w / ht
+            if not (0.55 <= ar <= 3.2):                 # bandeaux extrêmes écartés
+                continue
+            # --- dédup visuelle (tue les doublons/triplons ré-encodés) ---
+            dh = _dhash(pil)
+            if any(_hamming(dh, k) <= 5 for k in seen_hash):
+                continue
+            seen_hash.append(dh)
+            # --- classification par mesure ---
+            white, mid = _imgstats(pil)
+            colored = _colored_frac(pil)
+            big = min(w, ht) >= 500
+            square_small = (0.9 <= ar <= 1.1) and max(w, ht) <= 720   # carte Google static (~640²)
+            doc_page = colored < 0.08 and mid < 0.35 and 0.45 <= white <= 0.78  # couverture/conditions CBRE (texte)
+            if white < 0.25 and mid > 0.60:
+                kind = "photo"
+            elif square_small or doc_page:
+                kind = None                              # carte de localisation / page conditions : écartées
+            elif big and white > 0.42 and mid < 0.62:
+                kind = "plan"
+            elif is_plan_page and big:
+                kind = "plan"
+            elif is_photo_page and white < 0.40:
+                kind = "photo"
+            else:
+                kind = None
+            if kind == "photo":
+                photos.append({"data": data, "score": mid, "px": w * ht})
+            elif kind == "plan":
+                plans.append({"data": data, "px": w * ht})
+    # photos : les plus riches en contenu / les plus grandes d'abord, on les prend TOUTES
+    photos.sort(key=lambda x: x["score"] + x["px"] / 400000.0, reverse=True)
+    plans.sort(key=lambda x: x["px"], reverse=True)
+    photos_sel = photos if max_photos is None else photos[:max_photos]
+    plans_sel = plans if max_plans is None else plans[:max_plans]
+    photo_paths, plan_paths = [], []
+    for i, c in enumerate(photos_sel):
+        try: photo_paths.append(_save(c["data"], os.path.join(temp_dir, f"photo_{i}.jpg")))
+        except Exception: pass
+    for i, c in enumerate(plans_sel):
+        try: plan_paths.append(_save(c["data"], os.path.join(temp_dir, f"plan_{i}.jpg")))
+        except Exception: pass
+    return {"photos": photo_paths, "plans": plan_paths}
+
+
+def extract_photos(pdf_path, max_photos=None):
+    """Compat : renvoie uniquement les chemins photos (toutes par défaut)."""
+    return extract_media(pdf_path, max_photos=max_photos)["photos"]
+
+
+# ============ CARTE OpenStreetMap + CERCLE 300 m (100 % requests + PIL, sans dépendance) ============
+_TILE_UA = "equation-sie-descriptifs/1.0 (contact: mmoriceau@equation-sie.com)"
+
+def _deg2xy(lat, lon, z):
+    """Coordonnées de tuile (fractionnaires) Web Mercator."""
+    n = 2.0 ** z
+    x = (lon + 180.0) / 360.0 * n
+    lat_r = math.radians(lat)
+    y = (1.0 - math.asinh(math.tan(lat_r)) / math.pi) / 2.0 * n
+    return x, y
+
+def build_map_300(adresse, radius_m=300):
+    """Carte OpenStreetMap centrée sur le bien + cercle de 300 m, uploadée sur imgbb.
+    Aucune dépendance externe (staticmap/google) : on récupère les tuiles OSM avec
+    requests puis on les assemble avec PIL. Géocodage via Nominatim (OSM)."""
+    if not adresse:
+        return None
+    q = re.sub(r"\s+", " ", adresse.replace("—", " ")).strip()
+    if "france" not in q.lower():
+        q += ", France"
+    try:
+        # 1) Géocodage
+        gr = requests.get("https://nominatim.openstreetmap.org/search",
+                          params={"q": q, "format": "json", "limit": 1, "countrycodes": "fr"},
+                          headers={"User-Agent": _TILE_UA}, timeout=25).json()
+        if not gr:
+            return None
+        lat = float(gr[0]["lat"]); lon = float(gr[0]["lon"])
+
+        # 2) Assemblage des tuiles OSM (256 px) autour du centre
+        W, H, z, TS = 1000, 700, 16, 256
+        cx_t, cy_t = _deg2xy(lat, lon, z)
+        # tuile de départ (coin haut-gauche) pour couvrir W x H centré
+        px_center = cx_t * TS
+        py_center = cy_t * TS
+        left = px_center - W / 2
+        top = py_center - H / 2
+        x0 = int(math.floor(left / TS))
+        y0 = int(math.floor(top / TS))
+        nx = int(math.ceil((left + W) / TS)) - x0
+        ny = int(math.ceil((top + H) / TS)) - y0
+
+        canvas = Image.new("RGBA", (nx * TS, ny * TS), (235, 235, 235, 255))
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": _TILE_UA})
+        n_max = 2 ** z
+        for ix in range(nx):
+            for iy in range(ny):
+                tx, ty = x0 + ix, y0 + iy
+                if tx < 0 or ty < 0 or tx >= n_max or ty >= n_max:
+                    continue
+                url = f"https://a.tile.openstreetmap.org/{z}/{tx}/{ty}.png"
+                try:
+                    tr = sess.get(url, timeout=20)
+                    if tr.status_code == 200:
+                        tile = Image.open(io.BytesIO(tr.content)).convert("RGBA")
+                        canvas.paste(tile, (ix * TS, iy * TS))
+                except Exception:
+                    continue
+
+        # 3) Recadrage exact W x H centré sur le bien
+        off_x = int(round(left - x0 * TS))
+        off_y = int(round(top - y0 * TS))
+        img = canvas.crop((off_x, off_y, off_x + W, off_y + H)).convert("RGBA")
+
+        # 4) Cercle 300 m + pin central
+        base_mpp = 156543.03392 * math.cos(math.radians(lat)) / (2 ** z)
+        pr = radius_m / base_mpp
+        cx, cy = W / 2, H / 2
+        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0)); dd = ImageDraw.Draw(ov)
+        dd.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(214, 32, 54, 55),
+                   outline=(214, 32, 54, 255), width=6)
+        dd.ellipse([cx - 11, cy - 11, cx + 11, cy + 11], fill=(214, 32, 54, 255),
+                   outline=(255, 255, 255, 255), width=4)
+        out = Image.alpha_composite(img, ov).convert("RGB")
+        p = os.path.join(tempfile.mkdtemp(), "map.jpg"); out.save(p, "JPEG", quality=90)
+        return upload_image(p)
+    except Exception:
+        return None
+
+
+def upload_image(path):
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("utf-8")
+    r = requests.post("https://api.imgbb.com/1/upload",
+                      data={"key": IMGBB_API_KEY, "image": encoded}, timeout=30)
+    return r.json()["data"]["url"] if r.status_code == 200 else None
+
+
+# ============ PROMPT (from-template validé) ============
+def build_prompt(d, photo_urls, map_url, plan_urls=None):
+    plan_urls = plan_urls or []
+    vente = d.get("transaction") == "vente"
+    def lst(x): return " ; ".join([str(i) for i in (x or [])])
+    titles = d.get("card_titles") or ["Coûts récurrents", "Coûts à l'entrée", "Données juridiques"]
+    surf = "\n".join(f"- {row[0]}/{row[1]}/{row[2]}" for row in d.get("surfaces", []) if len(row) == 3)
+    dess = "\n".join(f"- {x}" for x in d.get("desserte", []))
+    gal = "\n".join(f"![]({u})" for u in photo_urls)
+    plans_md = "\n".join(f"![]({u})" for u in plan_urls)
+    eq = " ; ".join(f"{c['name']} {c['email']} {c['phone']}" for c in EQUIPE)
+    mp = f"\nCarte de situation (rayon 300 m) : ![]({map_url})" if map_url else ""
+    dispo = f" — Disponibilité : {d['dispo']}" if d.get("dispo") else ""
+    plans_block = (f"""
+
+PLANS (à placer UNIQUEMENT dans l'emplacement plans du modèle — affiche TOUS ces plans en grand, pleine largeur, l'un sous l'autre) :
+{plans_md}""" if plan_urls else "")
+    return f"""RESPECTE STRICTEMENT ce modèle : garde EXACTEMENT ses cartes, leur ORDRE, leurs INTITULÉS et sa mise en page. Tu ne fais que REMPLACER le contenu par celui de ce bien (français, chiffres au mot près). RÈGLE ABSOLUE : n'invente et n'ajoute AUCUNE carte qui n'existe pas dans le modèle (JAMAIS de carte « Parkings », « Prestations », « Climatisation », etc.). Toute information de conditions financières entre dans les TROIS cartes existantes ci-dessous et NULLE PART ailleurs — le parking va dans « {titles[0]} ». SUR LA COUVERTURE : CONSERVE le bandeau violet du modèle tel quel — ne le remplace JAMAIS par une photo, garde juste le titre/adresse et le logo du modèle. PHOTOS : mets TOUTES les photos fournies dans la ou les galeries photos du modèle, chacune UNE SEULE FOIS (AUCUN DOUBLON) ; utilise UNIQUEMENT les emplacements galerie existants (agrandis la galerie si besoin), sans créer de carte au titre nouveau. AGRANDIS la carte de situation sur la carte « Accès » : grande, pleine largeur. NE mets AUCUN titre du type « à retravailler ».
+
+COUVERTURE (garde le bandeau violet) : {d.get('adresse','')} — Bureaux à {'vendre' if vente else 'louer'} — {d.get('surface_full','')}{dispo}
+
+À RETENIR SUR L'IMMEUBLE : {lst(d.get('immeuble'))}
+À RETENIR SUR LES LOCAUX : {lst(d.get('locaux'))}
+
+GALERIE — AFFICHE TOUTES CES PHOTOS ({len(photo_urls)} photos réelles du bien, aucune à retirer) :
+{gal}{plans_block}
+
+CARTES CONDITIONS — remplis EXACTEMENT ces trois cartes du modèle, ni plus ni moins :
+{titles[0].upper()} : {lst(d.get('recurrents'))}
+{titles[1].upper()} : {lst(d.get('entree'))}
+{titles[2].upper()} : {lst(d.get('juridiques'))}
+
+TABLEAU DE SURFACES (Niveau/Type/Surface, du plus haut au plus bas) :
+{surf}
+
+ACCÈS & DESSERTE :
+{dess}{mp}
+
+CONTACTS (équipe Équation, remplacent ceux du confrère) : {eq}
+"""
+
+
+def create_gamma(prompt):
+    headers = {"X-API-KEY": GAMMA_API_KEY, "Content-Type": "application/json"}
+    payload = {"gammaId": GAMMA_TEMPLATE_ID, "prompt": prompt, "themeId": GAMMA_THEME_ID}
+    r = requests.post("https://public-api.gamma.app/v1.0/generations/from-template",
+                      headers=headers, json=payload, timeout=60)
+    if r.status_code not in (200, 201):
+        raise ValueError(f"Gamma API {r.status_code}: {r.text[:300]}")
+    gid = r.json().get("generationId")
+    if not gid:
+        raise ValueError(f"Pas de generationId : {r.text}")
+    for _ in range(70):
+        time.sleep(5)
+        poll = requests.get(f"https://public-api.gamma.app/v1.0/generations/{gid}",
+                            headers={"X-API-KEY": GAMMA_API_KEY}, timeout=20)
+        if poll.status_code == 200:
+            res = poll.json()
+            if res.get("status") == "completed":
+                return res.get("gammaUrl", "")
+            if res.get("status") in ("failed", "error"):
+                raise ValueError(f"Generation echouee: {res}")
+    raise ValueError("Timeout Gamma.")
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
