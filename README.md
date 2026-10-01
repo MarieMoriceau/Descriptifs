@@ -1,40 +1,69 @@
-# Carte prospection terrain
+# Descriptifs — PDF → Gamma (Équation SIE)
 
-Carte des immeubles visités par chaque négociateur, lue en direct dans la base Notion
-« 🚶🏻‍♂️ Prospection terrain ». Chaque ouverture de la page relit Notion (cache 60 s) et la page
-se rafraîchit toute seule toutes les 2 minutes.
+Outil interne qui transforme automatiquement le PDF d'un confrère (JLL, BNP, CBRE…)
+en un **descriptif Gamma éditable**, au format du MODELE 369 d'Équation.
 
-- Pastille = un immeuble, chiffre = nombre de relevés Notion à cette adresse
-- Couleur = négo (camembert si plusieurs négos sont passés)
-- Panneau de gauche : négo → rues → immeubles, filtre période, recherche société/rue
-- Adresses introuvables listées en bas, avec lien vers la fiche Notion à corriger
+Application en ligne : https://descriptifs.onrender.com
 
-## Onglet « Secteurs »
+---
 
-Choisis un négo : son ou ses secteurs s'affichent en pointillés, avec les immeubles qu'il a
-lui-même déjà visités à l'intérieur :
+## Ce que fait l'outil
 
-- 🟢 vert : dernière visite il y a moins de 2 mois
-- 🔴 rouge : plus ancien, donc à revoir
+À partir d'un PDF déposé, il produit un Gamma fini qui reprend le modèle Équation :
 
-Les secteurs sont décrits dans `secteurs.json` (voir `secteurs.exemple.json`) : un nom et un contour
-(liste de points latitude/longitude). Pour changer la durée « vert », ajoute la variable
-`FRESH_MONTHS` sur Render (2 par défaut).
+- **Couverture** avec le bandeau aubergine conservé
+- **Photos réelles** du bien (toutes, dédoublonnées — pas de doublon ni de triplon)
+- **Plans d'étage** (les vrais plans ; les cartes et pages de conditions sont écartées)
+- **Conditions financières, coûts à l'entrée, données juridiques** (3 cartes du modèle)
+- **Tableau des surfaces**, de l'étage le plus haut au plus bas
+- **Carte de situation** OpenStreetMap avec un cercle de 300 m autour du bien
+- **Contacts de l'équipe Équation** (remplacent ceux du confrère)
 
-## Déploiement (≈ 10 min)
+Il gère les trois grands formats de confrères :
+- plaquettes **texte** (JLL),
+- plaquettes **texte longues** (BNP),
+- plaquettes **tout en image** (CBRE) — lues par Claude en vision.
 
-1. **Token Notion** : notion.so/profile/integrations → réutilise ton intégration existante
-   (ou crée « Carte prospection », lecture seule). Dans la base Prospection terrain :
-   `•••` → *Connexions* → ajoute l'intégration.
-2. **GitHub** : crée le dépôt `MarieMoriceau/carte-prospection`, glisse-y tous les fichiers de ce dossier.
-3. **Render** : *New → Blueprint* → choisis le dépôt (le `render.yaml` fait le reste).
-   Renseigne les deux variables demandées :
-   - `NOTION_TOKEN` = le secret de l'intégration (`ntn_…`)
-   - `APP_PASSWORD` = un mot de passe partagé avec les négos (identifiant : n'importe quoi)
-4. Ouvre l'URL `https://carte-prospection.onrender.com` → c'est en ligne.
+---
 
-## Bon à savoir
+## Comment l'utiliser (au quotidien)
 
-- Offre Free : la page met ~30 s à se réveiller après 15 min d'inactivité.
-- Le géocodage (BAN) est mis en cache ; au réveil, il refait les ~100 adresses (quelques secondes).
-- Fond de carte : Plan IGN (gratuit, sans clé).
+1. Ouvrir https://descriptifs.onrender.com
+2. Glisser un ou plusieurs PDF de confrère
+3. Cliquer sur « Générer les Gammas »
+4. Patienter ~2–3 min par descriptif (le message « Génération Gamma » reste affiché, c'est normal)
+5. Cliquer sur « Ouvrir le Gamma » → le descriptif est dans l'espace Gamma, éditable sans code
+
+---
+
+## Fichiers du dépôt
+
+Seuls ces fichiers servent à l'application :
+
+| Fichier            | Rôle                                                        |
+|--------------------|-------------------------------------------------------------|
+| `app.py`           | Toute la logique (extraction, photos, plans, carte, Gamma)  |
+| `requirements.txt` | Les librairies à installer                                   |
+| `render.yaml`      | Configuration de déploiement Render                          |
+| `README.md`        | Ce fichier                                                   |
+
+Les autres fichiers éventuels (scripts de prospection, etc.) n'ont aucun effet sur l'outil.
+
+---
+
+## Déployer une mise à jour (en 3 étapes)
+
+> ⚠️ Ne jamais « tout remplacer d'un coup ». On ne touche qu'aux fichiers indiqués.
+
+1. Sur GitHub, ouvrir **`app.py`** → crayon ✏️ → tout sélectionner, effacer, coller la nouvelle version → **Commit changes**.
+   (Et seulement si demandé : faire pareil pour `requirements.txt`.)
+2. Render redéploie automatiquement (~3 min).
+3. Vérifier : ouvrir **https://descriptifs.onrender.com/version** — le numéro de version doit correspondre à la nouvelle. Puis relancer un descriptif pour contrôler.
+
+---
+
+## Réglages techniques
+
+- Clé Claude : variable d'environnement `ANTHROPIC_API_KEY` (dans les réglages Render).
+- Modèle Claude : `CLAUDE_MODEL` (par défaut `claude-haiku-4-5`).
+- Les autres clés (Gamma, hébergement d'images, thème/modèle Gamma) sont dans `app.py`.
